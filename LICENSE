@@ -1,20 +1,69 @@
-Creative Commons Attribution-NonCommercial 4.0 International
-
+MCP Aurai Server 双重许可协议
 Copyright (c) 2025 LZMW
 
-This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License.
+本项目采用双重许可模式：
 
-You are free to:
-- Share — copy and redistribute the material in any medium or format
-- Adapt — remix, transform, and build upon the material
+===================================
+1. 个人使用许可（免费）
+===================================
 
-Under the following terms:
-- Attribution — You must give appropriate credit, provide a link to the license, and indicate if changes were made.
-- NonCommercial — You may not use the material for commercial purposes.
+个人用户可以免费使用本软件，但必须遵守以下条件：
+- 仅用于个人学习、研究和非商业目的
+- 保留版权声明和许可协议
+- 不得用于任何商业用途或盈利目的
 
-No additional restrictions — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
+允许的操作：
+- 个人学习与研究
+- 开源项目贡献（非商业）
+- 修改源代码供个人使用
+- 在非商业项目中引用
 
-To view a copy of this license, visit:
-http://creativecommons.org/licenses/by-nc/4.0/
+禁止的操作：
+- 任何商业用途
+- 将软件集成到商业产品中
+- 基于本软件开发商业衍生产品
+- 未经授权的分发（用于商业目的）
 
-For commercial use inquiries, please contact: LZMW@users.noreply.github.com
+===================================
+2. 商业使用许可（付费）
+===================================
+
+任何商业用途必须获得作者的明确书面授权和商业许可授权。
+
+商业用途包括但不限于：
+- 在企业环境中使用
+- 将软件集成到商业产品中
+- 提供基于本软件的商业服务
+- 销售包含本软件的解决方案
+- 任何形式的盈利性使用
+
+商业许可授权：
+- 必须联系作者获得授权
+- 需要支付商业许可费用
+- 提供技术支持和优先维护
+- 可享受定制化服务
+
+===================================
+免责声明
+===================================
+
+本软件按"现状"提供，不提供任何形式的明示或暗示保证，
+包括但不限于适销性、适用性或非侵权性的保证。
+
+作者不对因使用本软件而产生的任何直接或间接损失负责。
+
+===================================
+联系方式
+===================================
+
+如需商业许可，请联系：
+- 作者：LZMW
+- 邮箱：294931663@qq.com
+- GitHub：https://github.com/LZMW/mcp-aurai-server
+
+===================================
+版本
+===================================
+
+许可协议版本：1.0
+最后更新：2025-01-22
