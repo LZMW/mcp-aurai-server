@@ -112,11 +112,7 @@ class AuraiConfigTool:
 
         self.config_preset = StringVar(value="custom")
         preset_options = [
-            "custom - 自定义中转站",
-            "zhipu - 智谱 AI",
-            "openai - OpenAI 官方",
-            "anthropic - Claude 官方",
-            "gemini - Google Gemini"
+            "custom - 自定义中转站（推荐使用 GLM-4.7）",
         ]
 
         preset_dropdown = ttk.Combobox(preset_frame, textvariable=self.config_preset, values=preset_options, state="readonly", font=("Microsoft YaHei", 10))
@@ -133,13 +129,14 @@ class AuraiConfigTool:
         # 字段定义（只保留必要的配置项）
         field_definitions = [
             ("AURAI_API_KEY", "API 密钥", "entry", None),
-            ("AURAI_PROVIDER", "AI 提供商", "combo", ["zhipu", "openai", "anthropic", "gemini", "custom"]),
             ("AURAI_BASE_URL", "API 地址 (Base URL)", "entry", None),
-            ("AURAI_MODEL", "模型名称", "combo_entry", []),
+            ("AURAI_MODEL", "模型名称（推荐 GLM-4.7）", "combo_entry", []),
+            ("AURAI_CONTEXT_WINDOW", "上下文窗口（默认 200000，基于 GLM-4.7）", "entry", None),
+            ("AURAI_MAX_MESSAGE_TOKENS", "单条消息最大 Tokens（默认 150000）", "entry", None),
+            ("AURAI_MAX_TOKENS", "最大输出 Tokens（默认 32000）", "entry", None),
             ("AURAI_MAX_ITERATIONS", "最大迭代次数 (5-20)", "entry", None),
             ("AURAI_MAX_HISTORY", "对话历史最大保存数 (10-100)", "entry", None),
             ("AURAI_TEMPERATURE", "温度参数 (0.0-2.0)", "entry", None),
-            ("AURAI_MAX_TOKENS", "最大 Tokens 数", "entry", None),
         ]
 
         row = 0
@@ -158,10 +155,6 @@ class AuraiConfigTool:
                 combo.grid(row=row, column=1, sticky="ew", pady=5, padx=5)
                 self.config_vars[key] = var
                 self.config_combos[key] = combo
-
-                # 绑定提供商改变事件
-                if key == "AURAI_PROVIDER":
-                    combo.bind("<<ComboboxSelected>>", self.on_provider_changed)
 
             elif field_type == "combo_entry":
                 var = StringVar()
@@ -367,7 +360,6 @@ class AuraiConfigTool:
                     config_values[key] = value
 
             # 获取关键配置用于生成说明
-            provider = config_values.get("AURAI_PROVIDER", "custom")
             base_url = config_values.get("AURAI_BASE_URL", "")
             model = config_values.get("AURAI_MODEL", "")
 
@@ -393,9 +385,10 @@ class AuraiConfigTool:
                 f.write("#\n")
                 f.write("# ✅ 第三步：配置 Claude Code（推荐）\n")
                 f.write("#   1. 使用下方 \"Claude Code 配置指南\" 中的命令\n")
-                f.write("#   2. 命令格式：claude mcp add aurai-advisor -e KEY=VALUE ... -- python -m mcp_aurai.server\n")
-                f.write("#   3. 执行命令后重启 Claude Code\n")
-                f.write("#   4. 验证：在对话中描述编程问题，AI 会判断是否调用 consult_aurai 工具\n")
+                f.write("#   2. 命令格式：claude mcp add --scope user --transport stdio aurai-advisor --env KEY=VALUE ... -- python -m mcp_aurai.server\n")
+                f.write("#   3. ⚠️ 重要：使用 --scope user 确保在所有项目中都可用，避免每次切换目录都要重新安装\n")
+                f.write("#   4. 执行命令后重启 Claude Code\n")
+                f.write("#   5. 验证：在对话中描述编程问题，AI 会判断是否调用 consult_aurai 工具\n")
                 f.write("#\n")
                 f.write("# ✅ 第四步：验证安装\n")
                 f.write("#   python -m mcp_aurai.server\n")
@@ -408,8 +401,8 @@ class AuraiConfigTool:
                 f.write("# 【项目信息】\n")
                 f.write(f"# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"# 配置工具: Aurai 配置工具 v2.0\n")
-                f.write(f"# 提供商: {provider}\n")
-                f.write(f"# 模型: {model}\n")
+                f.write(f"# 推荐模型: GLM-4.7\n")
+                f.write(f"# 当前模型: {model}\n")
                 if base_url:
                     f.write(f"# API 地址: {base_url}\n")
                 f.write("#\n")
@@ -421,10 +414,12 @@ class AuraiConfigTool:
                 f.write("# 🚀 Claude Code 配置命令\n")
                 f.write("################################################################################\n")
                 f.write("#\n")
+                f.write("# ⚠️ 重要：使用 --scope user 确保在所有项目中都可用\n")
+                f.write("#\n")
                 f.write("# 【执行下方命令添加 MCP 服务器】\n")
-                f.write(f"# claude mcp add aurai-advisor \\\n")
+                f.write(f"# claude mcp add --scope user --transport stdio aurai-advisor \\\n")
                 for key, value in config_values.items():
-                    f.write(f"#   -e {key}=\"{value}\" \\\n")
+                    f.write(f"#   --env {key}=\"{value}\" \\\n")
 
                 # 动态检测 Python 路径
                 python_path = sys.executable
@@ -437,12 +432,12 @@ class AuraiConfigTool:
                     else:
                         python_path = "[你的Python路径]"
 
-                f.write(f"#   -- \"{python_path}\" -m mcp_aurai.server\n")
+                f.write(f"#   -- \"{python_path}\" \"-m\" \"mcp_aurai.server\"\n")
                 f.write("#\n")
                 f.write("# 【常用命令】\n")
                 f.write("# 查看配置: claude mcp get aurai-advisor\n")
                 f.write("# 列出所有: claude mcp list\n")
-                f.write("# 删除配置: claude mcp remove aurai-advisor -s local\n")
+                f.write("# 删除配置: claude mcp remove aurai-advisor -s user\n")
                 f.write("#\n")
                 f.write("################################################################################\n")
                 f.write("#\n")
@@ -460,22 +455,24 @@ class AuraiConfigTool:
                 f.write("# 配置项说明\n")
                 f.write("################################################################################\n")
                 f.write("#\n")
-                f.write("# AURAI_API_KEY          - API 密钥（必填）\n")
-                f.write("# AURAI_PROVIDER         - AI 提供商\n")
-                f.write("#                          可选值: zhipu, openai, anthropic, gemini, custom\n")
-                f.write("# AURAI_BASE_URL         - API 基础地址（自定义中转站必填）\n")
-                f.write("#                          官方 API 可留空，自动使用默认地址\n")
-                f.write("# AURAI_MODEL            - 模型名称\n")
-                f.write("#                          可从 API 动态获取或手动输入\n")
-                f.write("# AURAI_MAX_ITERATIONS   - 最大对话轮数（默认 10）\n")
-                f.write("# AURAI_MAX_HISTORY       - 对话历史最大保存数（默认 50）\n")
-                f.write("# AURAI_TEMPERATURE      - 温度参数 0.0-2.0（默认 1.0）\n")
-                f.write("# AURAI_MAX_TOKENS       - 最大 token 数（默认 100000）\n")
+                f.write("# AURAI_API_KEY             - API 密钥（必填）\n")
+                f.write("# AURAI_BASE_URL           - API 基础地址（必填）\n")
+                f.write("#                            OpenAI 兼容 API 的完整地址\n")
+                f.write("# AURAI_MODEL               - 模型名称\n")
+                f.write("#                            推荐使用 GLM-4.7 系列\n")
+                f.write("# AURAI_CONTEXT_WINDOW      - 上下文窗口大小（默认：200000，基于 GLM-4.7）\n")
+                f.write("#                            使用其他模型时可根据实际情况调整\n")
+                f.write("# AURAI_MAX_MESSAGE_TOKENS  - 单条消息最大 Tokens（默认：150000）\n")
+                f.write("#                            用于大文件分批发送\n")
+                f.write("# AURAI_MAX_TOKENS           - 最大输出 Tokens（默认：32000）\n")
+                f.write("# AURAI_MAX_ITERATIONS      - 最大对话轮数（默认 10）\n")
+                f.write("# AURAI_MAX_HISTORY          - 对话历史最大保存数（默认 50）\n")
+                f.write("# AURAI_TEMPERATURE         - 温度参数 0.0-2.0（默认 0.7）\n")
                 f.write("#\n")
                 f.write("# 【以下配置自动管理，无需手动设置】\n")
-                f.write("# AURAI_ENABLE_PERSISTENCE - 对话历史持久化（自动启用）\n")
-                f.write("# AURAI_HISTORY_PATH     - 历史文件路径（自动保存到用户目录）\n")
-                f.write("# AURAI_LOG_LEVEL        - 日志级别（默认 INFO）\n")
+                f.write("# AURAI_ENABLE_PERSISTENCE   - 对话历史持久化（自动启用）\n")
+                f.write("# AURAI_HISTORY_PATH        - 历史文件路径（自动保存到用户目录）\n")
+                f.write("# AURAI_LOG_LEVEL           - 日志级别（默认 INFO）\n")
                 f.write("#\n")
                 f.write("################################################################################\n")
                 f.write("# 配置内容\n")
@@ -498,7 +495,7 @@ class AuraiConfigTool:
                 f.write("#    pip install -e \".[all-dev]\"\n")
                 f.write("#\n")
                 f.write("# 2. 配置 MCP（使用上方生成的命令）:\n")
-                f.write("#    claude mcp add aurai-advisor -e AURAI_API_KEY=\"...\" ...\n")
+                f.write("#    claude mcp add --scope user --transport stdio aurai-advisor --env AURAI_API_KEY=\"...\" ...\n")
                 f.write("#\n")
                 f.write("# 3. 验证安装:\n")
                 f.write("#    claude mcp list\n")
@@ -518,8 +515,12 @@ class AuraiConfigTool:
                 f.write("#   claude mcp list  # 检查配置\n")
                 f.write("#   claude mcp get aurai-advisor  # 查看详细配置\n")
                 f.write("#   # 若配置错误，删除后重新添加:\n")
-                f.write("#   claude mcp remove aurai-advisor -s local\n")
-                f.write("#   claude mcp add aurai-advisor ...\n")
+                f.write("#   claude mcp remove aurai-advisor -s user\n")
+                f.write("#   claude mcp add --scope user ...\n")
+                f.write("#\n")
+                f.write("# 【问题 1.1】每次打开 Claude Code 都要重新安装？\n")
+                f.write("# 原因: 使用了默认的本地范围（local），只在特定目录可用\n")
+                f.write("# 解决: 使用 --scope user 重新安装\n")
                 f.write("#\n")
                 f.write("# 【问题 2】ModuleNotFoundError: No module named 'mcp_aurai'\n")
                 f.write("# 原因: 未安装依赖或未在正确的 Python 环境\n")
@@ -561,30 +562,17 @@ class AuraiConfigTool:
                 f.write("# 📖 支持的服务商和获取 API 密钥\n")
                 f.write("################################################################################\n")
                 f.write("#\n")
-                f.write("# 【智谱 AI】(zhipu)\n")
+                f.write("# 【智谱 AI】（推荐使用 GLM-4.7）\n")
                 f.write("# 官网: https://open.bigmodel.cn/\n")
                 f.write("# 获取密钥: https://open.bigmodel.cn/usercenter/apikeys\n")
-                f.write("# 推荐模型: glm-4-flash（免费）, glm-4-plus\n")
+                f.write("# 推荐模型: glm-4.7, glm-4.7-flashx\n")
+                f.write("# API 地址: https://open.bigmodel.cn/api/paas/v4/\n")
                 f.write("#\n")
-                f.write("# 【OpenAI】(openai)\n")
-                f.write("# 官网: https://platform.openai.com/\n")
-                f.write("# 获取密钥: https://platform.openai.com/api-keys\n")
-                f.write("# 推荐模型: gpt-4o, gpt-4o-mini\n")
-                f.write("#\n")
-                f.write("# 【Anthropic Claude】(anthropic)\n")
-                f.write("# 官网: https://console.anthropic.com/\n")
-                f.write("# 获取密钥: https://console.anthropic.com/settings/keys\n")
-                f.write("# 推荐模型: claude-3-5-sonnet-20241022\n")
-                f.write("#\n")
-                f.write("# 【Google Gemini】(gemini)\n")
-                f.write("# 官网: https://aistudio.google.com/app/apikey\n")
-                f.write("# 获取密钥: https://makersuite.google.com/app/apikey\n")
-                f.write("# 推荐模型: gemini-1.5-flash, gemini-1.5-pro\n")
-                f.write("#\n")
-                f.write("# 【自定义中转站】(custom)\n")
-                f.write("# 说明: 使用第三方 OpenAI 兼容 API\n")
-                f.write("# 示例: https://www.chatgtp.cn/v1\n")
-                f.write("# 注意: 需填写完整的 AURAI_BASE_URL\n")
+                f.write("# 【其他 OpenAI 兼容 API】\n")
+                f.write("# 本项目使用 OpenAI 兼容 API，可接入任何兼容服务：\n")
+                f.write("# • DeepSeek: https://api.deepseek.com/v1\n")
+                f.write("# • 第三方中转站：根据提供商提供的地址\n")
+                f.write("# • 其他兼容 GPT/DeepSeek/Qwen 等模型的服务\n")
                 f.write("#\n")
                 f.write("################################################################################\n")
                 f.write("# 📞 技术支持\n")
@@ -648,25 +636,10 @@ class AuraiConfigTool:
         支持 OpenAI 兼容的 /v1/models 端点
         """
         try:
-            # 构建 API URL
-            if provider == "custom":
-                # 自定义提供商使用配置的 base_url
-                if not base_url:
-                    return []
-                api_url = f"{base_url.rstrip('/')}/models"
-            elif provider in ["openai", "anthropic", "gemini"]:
-                # OpenAI 兼容的官方 API
-                if provider == "openai":
-                    api_url = "https://api.openai.com/v1/models"
-                elif provider == "anthropic":
-                    # Anthropic 不支持 /models 端点，返回预设列表
-                    return self.MODEL_PRESETS.get("anthropic", [])
-                elif provider == "gemini":
-                    # Gemini 不支持标准 /models 端点，返回预设列表
-                    return self.MODEL_PRESETS.get("gemini", [])
-            else:
-                # zhipu 等其他提供商返回预设列表
-                return self.MODEL_PRESETS.get(provider, [])
+            # 构建自定义提供商使用配置的 base_url
+            if not base_url:
+                return []
+            api_url = f"{base_url.rstrip('/')}/models"
 
             # 如果没有 API Key，无法调用
             if not api_key:
@@ -690,26 +663,25 @@ class AuraiConfigTool:
 
         except urllib.error.HTTPError:
             # API 调用失败（401/403 等），返回预设列表
-            return self.MODEL_PRESETS.get(provider, [])
+            return self.MODEL_PRESETS.get("custom", [])
         except urllib.error.URLError:
             # 网络错误，返回预设列表
-            return self.MODEL_PRESETS.get(provider, [])
+            return self.MODEL_PRESETS.get("custom", [])
         except Exception:
             # 其他错误，返回预设列表
-            return self.MODEL_PRESETS.get(provider, [])
+            return self.MODEL_PRESETS.get("custom", [])
 
     def refresh_model_list(self):
         """刷新模型列表（从 API 获取）"""
-        provider = self.config_vars.get("AURAI_PROVIDER", StringVar()).get()
         base_url = self.config_vars.get("AURAI_BASE_URL", StringVar()).get()
         api_key = self.config_vars.get("AURAI_API_KEY", StringVar()).get()
 
-        if not provider:
-            self.show_status("请先选择提供商", "red")
-            return
-
         if not api_key:
             self.show_status("请先配置 API 密钥", "orange")
+            return
+
+        if not base_url:
+            self.show_status("请先配置 API 地址", "orange")
             return
 
         # 显示加载状态
@@ -718,7 +690,7 @@ class AuraiConfigTool:
 
         # 在后台线程中获取模型列表
         def fetch_in_background():
-            models = self.fetch_models_from_api(provider, base_url, api_key)
+            models = self.fetch_models_from_api("custom", base_url, api_key)
 
             # 更新 UI（必须在主线程中）
             self.root.after(0, lambda: self._update_model_combo(models))
@@ -736,8 +708,7 @@ class AuraiConfigTool:
             self.show_status(f"已加载 {len(models)} 个模型", "green")
         else:
             # 如果 API 调用失败，使用预设列表
-            provider = self.config_vars.get("AURAI_PROVIDER", StringVar()).get()
-            fallback_models = self.MODEL_PRESETS.get(provider, [])
+            fallback_models = self.MODEL_PRESETS.get("custom", [])
             self.model_combo['values'] = fallback_models
             if fallback_models:
                 self.show_status(f"API 调用失败，使用预设列表（{len(fallback_models)} 个模型）", "orange")
@@ -745,39 +716,24 @@ class AuraiConfigTool:
                 self.show_status("无法获取模型列表，请手动输入", "red")
 
     # ========== 模型预设配置 ==========
-    # 各提供商的官方和第三方中转站模型预设（作为 API 调用失败时的后备）
+    # 推荐模型列表（基于 GLM-4.7 优化）
     MODEL_PRESETS = {
-        "zhipu": [
+        "custom": [
+            # 智谱 AI GLM-4.7 系列（推荐）
+            "glm-4.7",
+            "glm-4.7-flashx",
+            # 智谱 AI 其他模型
             "glm-4-flash",
             "glm-4-plus",
-            "glm-4-0520",
             "glm-4-air",
             "glm-3-turbo",
-        ],
-        "openai": [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo",
-        ],
-        "anthropic": [
-            "claude-sonnet-4-5-20250514",
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku-20241022",
-            "claude-3-opus-20240229",
-        ],
-        "gemini": [
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-1.5-pro",
-            "gemini-1.5-flash",
-        ],
-        "custom": [
-            # 第三方中转站常用模型（OpenAI 兼容格式）
+            # DeepSeek
             "deepseek-v3-1-250821",
             "deepseek-chat",
             "deepseek-coder",
+            # 其他常用模型
+            "gpt-4o",
+            "gpt-4o-mini",
             "Qwen/Qwen2.5-72B-Instruct",
             "meta-llama/Llama-3.1-70B-Instruct",
         ],
@@ -785,30 +741,12 @@ class AuraiConfigTool:
 
     # 配置预设值
     CONFIG_PRESETS = {
-        "zhipu": {
-            "AURAI_PROVIDER": "zhipu",
-            "AURAI_BASE_URL": "",
-            "AURAI_MODEL": "glm-4-flash",
-        },
-        "openai": {
-            "AURAI_PROVIDER": "openai",
-            "AURAI_BASE_URL": "https://api.openai.com/v1",
-            "AURAI_MODEL": "gpt-4o-mini",
-        },
-        "anthropic": {
-            "AURAI_PROVIDER": "anthropic",
-            "AURAI_BASE_URL": "https://api.anthropic.com",
-            "AURAI_MODEL": "claude-3-5-sonnet-20241022",
-        },
-        "gemini": {
-            "AURAI_PROVIDER": "gemini",
-            "AURAI_BASE_URL": "",
-            "AURAI_MODEL": "gemini-1.5-flash",
-        },
         "custom": {
-            "AURAI_PROVIDER": "custom",
-            "AURAI_BASE_URL": "https://www.chatgtp.cn/v1",
-            "AURAI_MODEL": "deepseek-v3-1-250821",
+            "AURAI_BASE_URL": "https://open.bigmodel.cn/api/paas/v4/",
+            "AURAI_MODEL": "glm-4.7",
+            "AURAI_CONTEXT_WINDOW": "200000",
+            "AURAI_MAX_MESSAGE_TOKENS": "150000",
+            "AURAI_MAX_TOKENS": "32000",
         },
     }
 
@@ -824,7 +762,7 @@ class AuraiConfigTool:
                 if key in self.config_vars:
                     self.config_vars[key].set(value)
 
-            # 先使用预设列表，然后尝试从 API 获取
+            # 使用预设列表
             if preset_key in self.MODEL_PRESETS:
                 self.model_combo['values'] = self.MODEL_PRESETS[preset_key]
                 if self.MODEL_PRESETS[preset_key]:
@@ -838,23 +776,8 @@ class AuraiConfigTool:
                 self.root.after(500, self.refresh_model_list)  # 延迟 500ms 执行
 
     def on_provider_changed(self, event):
-        """提供商改变事件 - 自动从 API 获取模型列表"""
-        provider = self.config_vars.get("AURAI_PROVIDER", StringVar()).get()
-
-        # 先使用预设列表作为临时显示
-        if provider in self.MODEL_PRESETS:
-            models = self.MODEL_PRESETS[provider]
-            self.model_combo['values'] = models
-
-            if models and not self.config_vars["AURAI_MODEL"].get():
-                self.config_vars["AURAI_MODEL"].set(models[0])
-
-        self.show_status(f"已切换到 {provider} 提供商", "blue")
-
-        # 如果有 API Key，自动从 API 获取最新模型列表
-        api_key = self.config_vars.get("AURAI_API_KEY", StringVar()).get()
-        if api_key:
-            self.root.after(500, self.refresh_model_list)  # 延迟 500ms 执行
+        """提供商改变事件 - 已废弃（仅保留 custom）"""
+        pass
 
     def create_help_panel(self, parent):
         """创建右侧帮助面板"""
@@ -883,40 +806,33 @@ class AuraiConfigTool:
 【API 密钥】
 必填项，从各平台获取。
 
-【AI 提供商】
-• zhipu - 智谱 AI
-• openai - OpenAI 官方
-• anthropic - Claude 官方
-• gemini - Google Gemini
-• custom - 自定义中转站
-
 【API 地址】
-官方 API 可留空，自动使用默认地址。
-第三方中转站需填写完整地址。
+OpenAI 兼容 API 的完整地址。
+智谱 AI: https://open.bigmodel.cn/api/paas/v4/
+DeepSeek: https://api.deepseek.com/v1
+其他中转站: 根据提供商填写
 
 【模型名称】
+推荐使用 GLM-4.7 系列：
+• glm-4.7（旗舰版，200K 上下文）
+• glm-4.7-flashx（轻量高速版）
 可从下拉列表选择，或手动输入。
 点击 🔄 按钮可从 API 获取最新模型列表。
 
-【常见第三方中转站】
-• https://www.chatgtp.cn/v1
-• https://api.openai.com/v1
-• 其他 OpenAI 兼容地址
+【Token 配置（默认基于 GLM-4.7）】
+• 上下文窗口：200000 tokens
+• 单条消息最大：150000 tokens
+• 最大输出：32000 tokens
+使用其他模型时可调整这些值。
 
-【官方 API 文档】
-智谱: https://open.bigmodel.cn/
-OpenAI: https://platform.openai.com/
-Claude: https://docs.anthropic.com/
-Gemini: https://ai.google.dev/
-
-【自动管理配置】
-以下配置由系统自动管理，无需手动设置：
-• 对话历史持久化 - 自动启用
-• 历史文件路径 - 自动保存到用户目录
-• 日志级别 - 默认 INFO
+【GLM-4.7 优势】
+• 200K 上下文窗口
+• 强大的编码和推理能力
+• 支持深度思考模式
+• 完美适合代码审查和复杂任务
 
 💡 提示：
-使用快速配置预设可自动填充常用配置。
+选择预设可自动填充 GLM-4.7 优化配置。
 
 📝 生成后：
 配置文件包含完整的安装指导，

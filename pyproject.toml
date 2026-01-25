@@ -1,17 +1,15 @@
 [project]
 name = "mcp-aurai-advisor"
-version = "0.1.1"
+version = "2.2.0"
 description = "上级顾问 MCP 服务器 - 让本地AI获取远程AI指导"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=0.1.0",
-    "zhipuai>=2.0.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "openai>=1.0.0",
-    "anthropic>=0.18.0",
-    "google-generativeai>=0.3.0",
+    "httpx>=0.24.0",
 ]
 
 [build-system]

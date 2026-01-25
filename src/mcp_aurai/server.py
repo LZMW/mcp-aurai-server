@@ -136,7 +136,7 @@ async def consult_aurai(
     ),
 ) -> dict[str, Any]:
     """
-    请求上级AI的指导（支持交互对齐机制）
+    请求上级AI的指导（支持交互对齐机制与多轮对话）
 
     这是核心工具，当本地AI遇到编程问题时调用此工具获取上级AI的指导建议。
 
@@ -388,12 +388,20 @@ async def consult_aurai(
 
 @mcp.tool()
 async def sync_context(
-    operation: str = Field(description="操作类型: full_sync, incremental, clear"),
-    files: Any = Field(default=None, description="**重要**：只能上传 .txt 或 .md 文件！文件路径列表（支持 JSON 字符串或列表，会自动解析）"),
-    project_info: Any = Field(default=None, description="项目信息（支持 JSON 字符串或字典，会自动解析）"),
+    operation: str = Field(
+        description="操作类型: full_sync（完整同步）, incremental（增量添加）, clear（清空历史）"
+    ),
+    files: Any = Field(
+        default=None,
+        description="**文件上传功能** ⭐：支持上传 .txt 和 .md 文件给上级顾问阅读，避免代码/文本在 consult_aurai 的 context 字段中被截断。文件路径列表（支持 JSON 字符串或列表，会自动解析）"
+    ),
+    project_info: Any = Field(
+        default=None,
+        description="项目信息字典，可包含项目名称、技术栈、任务描述等任意字段（支持 JSON 字符串或字典，会自动解析）"
+    ),
 ) -> dict[str, Any]:
     """
-    同步代码上下文
+    同步代码上下文（支持上传 .md 和 .txt 文件，避免内容被截断）
 
     在第一次调用或上下文发生重大变化时使用，让上级AI了解当前项目的整体情况。
 
@@ -625,6 +633,10 @@ async def report_progress(
     报告执行进度，请求下一步指导
 
     在执行了上级AI的建议后，调用此工具报告结果，获取下一步指导。
+
+    ---
+    **使用场景**：执行上级 AI 建议后，报告执行结果并获取后续指导
+    **参数**：actions_taken（已执行的行动）、result（success/failed/partial）、new_error（新错误）、feedback（反馈）
     """
     config = get_aurai_config()
 
@@ -685,7 +697,10 @@ async def get_status() -> dict[str, Any]:
     """
     获取当前状态
 
-    返回当前对话状态、迭代次数等信息。
+    返回当前对话状态、迭代次数、配置信息等。
+
+    ---
+    **返回内容**：conversation_history_count（对话历史数量）、max_iterations（最大迭代次数）、max_history（最大历史条数）、provider（AI提供商）、model（模型名称）
     """
     return {
         "conversation_history_count": len(_conversation_history),

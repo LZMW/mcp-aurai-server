@@ -10,13 +10,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# ============================================================================
+# GLM-4.7 模型参数配置（基于智谱 GLM-4.7 规格的默认值）
+# ============================================================================
+# GLM-4.7 模型规格：
+#   - 上下文窗口：200,000 tokens
+#   - 最大输出：128,000 tokens
+#
+# 本配置采用 GLM-4.7 参数作为默认值，确保最佳性能和稳定性：
+#   - context_window: 200,000（模型上限）
+#   - max_message_tokens: 150,000（单条文件消息上限）
+#   - max_tokens: 32,000（建议输出长度）
+#
+# 用户可通过环境变量覆盖这些默认值（适用于其他模型）
+# ============================================================================
+
+# 模型上下文窗口大小（tokens）- 默认基于 GLM-4.7 的 200K 上限
+# 可通过 AURAI_CONTEXT_WINDOW 环境变量覆盖
+DEFAULT_CONTEXT_WINDOW = 200000
+
+# 单条消息最大 tokens（用于文件内容分批发送）
+# 可通过 AURAI_MAX_MESSAGE_TOKENS 环境变量覆盖
+DEFAULT_MAX_MESSAGE_TOKENS = 150000
+
+# 最大输出 tokens（上级 AI 的回复长度）
+# 可通过 AURAI_MAX_TOKENS 环境变量覆盖
+DEFAULT_MAX_TOKENS = 32000
+
+
 class AuraiConfig(BaseModel):
     """上级AI配置"""
 
-    # API提供商
-    provider: Literal["zhipu", "openai", "anthropic", "gemini", "custom"] = Field(
-        default_factory=lambda: os.getenv("AURAI_PROVIDER", "zhipu"),
-        description="AI服务提供商"
+    # API提供商（固定为 custom，使用 OpenAI 兼容 API）
+    provider: Literal["custom"] = Field(
+        default="custom",
+        description="AI服务提供商（固定使用自定义 OpenAI 兼容 API）"
     )
 
     # API密钥
@@ -33,8 +61,22 @@ class AuraiConfig(BaseModel):
 
     # 模型名称
     model: str = Field(
-        default_factory=lambda: os.getenv("AURAI_MODEL", "glm-4-flash"),
+        default_factory=lambda: os.getenv("AURAI_MODEL", "gpt-4o"),
         description="模型名称"
+    )
+
+    # 上下文窗口大小（tokens）- 默认基于 GLM-4.7，可通过环境变量覆盖
+    context_window: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW))),
+        ge=1,
+        description="模型上下文窗口大小（默认：200,000，基于 GLM-4.7）"
+    )
+
+    # 单条消息最大 tokens - 默认基于 GLM-4.7，可通过环境变量覆盖
+    max_message_tokens: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_MAX_MESSAGE_TOKENS", str(DEFAULT_MAX_MESSAGE_TOKENS))),
+        ge=1,
+        description="单条消息最大 tokens（默认：150,000，基于 GLM-4.7 优化）"
     )
 
     # 最大迭代次数
@@ -51,11 +93,11 @@ class AuraiConfig(BaseModel):
         description="温度参数"
     )
 
-    # 最大tokens
+    # 最大生成 tokens - 默认基于 GLM-4.7，可通过环境变量覆盖
     max_tokens: int = Field(
-        default=4096,
+        default_factory=lambda: int(os.getenv("AURAI_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
         ge=1,
-        description="最大生成tokens"
+        description="最大生成 tokens（默认：32,000，基于 GLM-4.7 优化）"
     )
 
     @field_validator('api_key')
