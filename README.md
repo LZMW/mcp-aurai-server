@@ -23,6 +23,60 @@
 
 ## v2.2.0 更新说明
 
+### ⚠️ 重要：旧版用户迁移指南
+
+如果您已经安装了 **v2.1.x 或更早版本**，请注意以下迁移事项：
+
+#### 情况 1：使用 `custom` provider（OpenAI 兼容 API）的用户 ✅
+
+**好消息**：无需重新安装或重新配置！
+
+```bash
+# 只需升级版本即可
+cd D:\mcp-aurai-server
+git pull origin main
+pip install -e ".[all-dev]"
+
+# 重启 Claude Code，自动生效
+```
+
+- ✅ 新的环境变量（`AURAI_CONTEXT_WINDOW`、`AURAI_MAX_MESSAGE_TOKENS`、`AURAI_MAX_TOKENS`）是**可选的**
+- ✅ 默认值已针对 GLM-4.7 优化（200K 上下文）
+- ✅ 文件上传修复是透明的，会自动生效
+
+#### 情况 2：使用 `zhipu`、`openai`、`anthropic`、`gemini` provider 的用户 ❌
+
+**需要迁移**：v2.2.0 移除了这些 provider，需要切换到 `custom` + OpenAI 兼容 API。
+
+**迁移步骤（以智谱 AI 为例）**：
+
+```bash
+# 1. 删除旧配置
+claude mcp remove aurai-advisor -s user
+
+# 2. 重新添加（使用 custom provider）
+claude mcp add --scope user --transport stdio aurai-advisor \
+  --env AURAI_API_KEY="your-api-key" \
+  --env AURAI_BASE_URL="https://open.bigmodel.cn/api/paas/v4/" \
+  --env AURAI_MODEL="glm-4.7" \
+  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+
+# 3. 重启 Claude Code
+```
+
+**各服务商迁移配置**：
+
+| 原提供商 | 新 AURAI_BASE_URL | 推荐模型 |
+|---------|------------------|---------|
+| `zhipu` | `https://open.bigmodel.cn/api/paas/v4/` | `glm-4.7` |
+| `openai` | `https://api.openai.com/v1` | `gpt-4o` |
+| `anthropic` | 需使用第三方兼容 API | - |
+| `gemini` | 需使用第三方兼容 API | - |
+
+> **提示**：升级后，建议运行 `python .ai_temp/test_file_upload_fix.py` 验证文件上传功能是否正常。
+
+---
+
 ### 重大变更
 
 1. **简化服务商支持**
