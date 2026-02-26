@@ -393,7 +393,7 @@ async def sync_context(
     ),
     files: Any = Field(
         default=None,
-        description="**文件上传功能** ⭐：支持上传 .txt 和 .md 文件给上级顾问阅读，避免代码/文本在 consult_aurai 的 context 字段中被截断。文件路径列表（支持 JSON 字符串或列表，会自动解析）"
+        description="**⚠️ 只支持 .txt 和 .md 文件！** 如需上传代码文件（.py/.js/.json等），必须先复制为 .txt。示例: shutil.copy('script.py', 'script.txt') 然后传 files=['script.txt']。文件路径列表（支持 JSON 字符串或列表，会自动解析）"
     ),
     project_info: Any = Field(
         default=None,
@@ -598,12 +598,24 @@ async def sync_context(
 
         logger.info(f"上下文已同步，文件数: {len(all_files)}，读取文本文件: {len(file_contents)}，创建临时文件: {len(temp_files)}")
 
+        # 如果有跳过的文件，返回错误状态
+        if skipped_files:
+            logger.warning(f"[错误] 跳过了不支持的文件类型: {skipped_files}")
+            return {
+                "status": "error",
+                "message": f"❌ 文件类型不支持，请转换为 .txt 后重试: {skipped_files}",
+                "skipped_files": skipped_files,
+                "hint": "sync_context 只支持 .txt 和 .md 文件。代码文件请先: shutil.copy('xxx.py', 'xxx.txt')",
+                "supported_types": [".txt", ".md"],
+                "files_count": len(all_files),
+                "text_files_read": len(file_contents),
+                "temp_files_created": len(temp_files),
+            }
+
         # 构建返回消息
         message_parts = [f"上下文已同步 ({operation})"]
         if temp_files:
             message_parts.append(f"{len(temp_files)}个大内容已缓存")
-        if skipped_files:
-            message_parts.append(f"跳过{len(skipped_files)}个不支持的文件")
 
         return {
             "status": "success",
@@ -611,7 +623,6 @@ async def sync_context(
             "files_count": len(all_files),
             "text_files_read": len(file_contents),
             "temp_files_created": len(temp_files),
-            "skipped_files": skipped_files,  # 告知下级AI哪些文件被跳过
             "history_count": len(_conversation_history),
         }
 
