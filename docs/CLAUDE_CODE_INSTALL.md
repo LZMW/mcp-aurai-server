@@ -1,229 +1,209 @@
 # Claude Code 安装指南
 
-> **aurai-advisor MCP 服务器** - Claude Code 专用安装指南
+> 这份文档对应当前仓库主线，适用于 Claude Code 中安装 `aurai-advisor`。
 
 ---
 
-## 📋 快速安装（5分钟）
+## 安装前准备
 
-### 1. 环境准备
+需要先确认两件事：
+
+1. 你的机器能运行 `Python 3.10+`
+2. 你已经安装并能使用 `Claude Code`
+
+检查命令：
 
 ```bash
-# 检查 Python 版本（需要 3.10+）
 python --version
-
-# 检查 Claude Code
 claude --version
 ```
 
-### 2. 安装依赖（必须步骤！）
+---
 
-> **重要**：必须先创建虚拟环境并安装项目，否则 MCP 无法启动。
+## 一步一步安装
+
+### 1. 进入项目目录
 
 ```bash
-# 进入项目目录
-cd D:\mcp-aurai-server
+cd G:\codex\mcp-aurai-server
+```
 
-# 创建虚拟环境（如果还没有）
+### 2. 创建虚拟环境
+
+```bash
 python -m venv venv
+```
 
-# 激活虚拟环境并安装项目
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
+### 3. 激活虚拟环境
 
-# 以可编辑模式安装项目及其依赖
+Windows：
+
+```bash
+venv\Scripts\activate
+```
+
+macOS / Linux：
+
+```bash
+source venv/bin/activate
+```
+
+### 4. 安装项目
+
+```bash
 pip install -e ".[all-dev]"
-
-# 验证安装
-pytest tests/ -v
-# 预期: 27 passed
 ```
 
-### 3. 配置 MCP
+### 5. 注册到 Claude Code
 
-> **关键**：使用 `--scope user` 确保在所有项目中都可用，避免每次切换目录都要重新安装。
+最推荐用 `--scope user`，这样所有项目里都能直接用，不用切目录后反复重装。
 
-**方式 A: 使用配置工具（推荐）**
 ```bash
-python tools\control_center.py
+claude mcp add --scope user --transport stdio aurai-advisor ^
+  --env AURAI_API_KEY="your-api-key" ^
+  --env AURAI_BASE_URL="https://api.example.com/v1" ^
+  --env AURAI_MODEL="gpt-4o" ^
+  -- "G:\codex\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
 ```
 
-1. 填写 API 密钥
-2. 选择提供商和模型
-3. 点击"生成配置文件"
-4. **重要**：在生成的命令前添加 `--scope user`
-
-**方式 B: 手动配置**
+如果你用的是智谱：
 
 ```bash
-# 替换以下环境变量为你的实际值
-claude mcp add --scope user --transport stdio aurai-advisor \
-  --env AURAI_API_KEY="your-api-key" \
-  --env AURAI_PROVIDER="custom" \
-  --env AURAI_BASE_URL="https://www.chatgtp.cn/v1" \
-  --env AURAI_MODEL="deepseek-v3-1-250821" \
-  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+claude mcp add --scope user --transport stdio aurai-advisor ^
+  --env AURAI_API_KEY="your-api-key" ^
+  --env AURAI_BASE_URL="https://open.bigmodel.cn/api/paas/v4/" ^
+  --env AURAI_MODEL="glm-4.7" ^
+  -- "G:\codex\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
 ```
 
-### 4. 验证安装
+如果你用的是 DeepSeek：
 
 ```bash
-# 检查 MCP 状态
+claude mcp add --scope user --transport stdio aurai-advisor ^
+  --env AURAI_API_KEY="your-api-key" ^
+  --env AURAI_BASE_URL="https://api.deepseek.com/v1" ^
+  --env AURAI_MODEL="deepseek-chat" ^
+  -- "G:\codex\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+```
+
+---
+
+## 验证安装
+
+### 1. 检查 Claude Code 里的 MCP 状态
+
+```bash
 claude mcp list
-
-# 预期输出：
-# aurai-advisor: ... - ✓ Connected
-
-# 查看详细配置
-claude mcp get aurai-advisor
-# 应该显示：Scope: User config (available in all your projects)
 ```
 
-### 5. 测试工具
+应该能看到 `aurai-advisor`。
 
-在 Claude Code 对话中描述一个编程问题：
+### 2. 运行测试
 
+```bash
+pytest
 ```
-我遇到了一个 KeyError 问题，错误信息是 'api_key' not found
+
+### 3. 实际对话验证
+
+在 Claude Code 里随便问一个稍复杂的编程问题，例如：
+
+```text
+我项目启动时报错，请帮我排查
 ```
 
-AI 会自动判断是否调用 `consult_aurai` 工具。
+如果客户端开始调用 `consult_aurai` 或 `sync_context`，说明接通了。
 
 ---
 
-## 🔧 配置模板
+## 推荐的环境变量
 
-### 智谱 AI（推荐新手）
+最少只需要这 3 个：
+
+- `AURAI_API_KEY`
+- `AURAI_BASE_URL`
+- `AURAI_MODEL`
+
+如果你想更稳一些，建议顺手补这几个：
 
 ```bash
-claude mcp add --scope user --transport stdio aurai-advisor \
-  --env AURAI_API_KEY="your-key" \
-  --env AURAI_PROVIDER="zhipu" \
-  --env AURAI_MODEL="glm-4-flash" \
-  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+--env AURAI_MAX_ITERATIONS="10" ^
+--env AURAI_LOG_LEVEL="INFO" ^
+--env AURAI_CONTEXT_WINDOW="200000" ^
+--env AURAI_MAX_MESSAGE_TOKENS="150000" ^
+--env AURAI_MAX_TOKENS="32000"
 ```
 
-### 自定义中转站
+如果你想让不同项目互不影响，也可以给不同安装项配不同的历史文件路径：
 
 ```bash
-claude mcp add --scope user --transport stdio aurai-advisor \
-  --env AURAI_API_KEY="your-key" \
-  --env AURAI_PROVIDER="custom" \
-  --env AURAI_BASE_URL="https://www.chatgtp.cn/v1" \
-  --env AURAI_MODEL="deepseek-v3-1-250821" \
-  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
-```
-
-### OpenAI 官方
-
-```bash
-claude mcp add --scope user --transport stdio aurai-advisor \
-  --env AURAI_API_KEY="sk-..." \
-  --env AURAI_PROVIDER="openai" \
-  --env AURAI_MODEL="gpt-4o" \
-  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+--env AURAI_HISTORY_PATH="G:\codex\mcp-aurai-server\.mcp-aurai\history.json"
 ```
 
 ---
 
-## 🐛 常见问题
+## 你现在会得到什么能力
 
-### 每次打开 Claude Code 都要重新安装？
+安装完成后，这个 MCP 已经支持：
 
-**原因**：使用了默认的本地范围（local），只在特定目录可用。
+- 多轮咨询与进度回报
+- `session_id` 会话隔离
+- 历史自动摘要
+- 历史文件锁与原子写
+- 自动把代码/配置文件转成文本上传给上级顾问
 
-**解决方案**：使用 `--scope user` 重新安装：
+这意味着：
+
+- 不需要再手动把 `main.py` 改名成 `main.txt`
+- 不同问题可以各自走各自的上下文
+- 长会话不会越来越臃肿
+
+---
+
+## 常见问题
+
+### 1. `claude mcp list` 里看不到它
+
+先删掉旧配置，再重新加：
 
 ```bash
-# 1. 删除旧配置
-claude mcp remove aurai-advisor -s local
-
-# 2. 用 user scope 重新添加
+claude mcp remove aurai-advisor -s user
 claude mcp add --scope user ...
 ```
 
-### MCP 工具没有出现
+### 2. 报 `ModuleNotFoundError`
+
+说明虚拟环境没装好，重新执行：
 
 ```bash
-claude mcp list  # 检查配置
-claude mcp remove aurai-advisor -s local
-claude mcp add --scope user aurai-advisor ...  # 重新添加
-```
-
-### ModuleNotFoundError: No module named 'mcp_aurai'
-
-**原因**：虚拟环境未创建或项目未安装。
-
-**解决方案**：
-
-```bash
-cd D:\mcp-aurai-server
+cd G:\codex\mcp-aurai-server
 python -m venv venv
 venv\Scripts\activate
 pip install -e ".[all-dev]"
 ```
 
-### Connection failed / Failed to connect
+### 3. 代码文件上传了，但上级顾问没看到
 
-**可能原因**：
-1. Python 路径不正确
-2. 虚拟环境未正确安装
+先看 `sync_context` 返回结果里的：
 
-**排查步骤**：
+- `uploaded_files`
+- `auto_converted_files`
+- `skipped_files`
 
-```bash
-# 1. 验证 Python 路径
-D:\mcp-aurai-server\venv\Scripts\python.exe --version
+如果文件在 `skipped_files` 里，通常是：
 
-# 2. 验证模块可导入
-D:\mcp-aurai-server\venv\Scripts\python.exe -c "import mcp_aurai.server; print('OK')"
+- 路径不存在
+- 文件是二进制
+- 文件内容无法按文本读取
 
-# 3. 查看详细配置
-claude mcp get aurai-advisor
-```
+### 4. 为什么旧问题会影响新问题
 
-### 401 Unauthorized
-
-- 检查 API 密钥是否正确
-- 访问提供商平台重新生成
-
-### 404 Model not found
-
-- 使用配置工具的"刷新模型"功能
-- 检查模型名称拼写
+给不同问题传不同 `session_id`，或者开始新问题时设置 `is_new_question=true`。
 
 ---
 
-## 📚 相关文档
+## 推荐阅读
 
-- [用户手册](用户手册.md) - 完整使用指南
-- [开发文档](开发文档.md) - 技术细节
-
----
-
-## 📞 获取 API 密钥
-
-| 提供商 | 获取地址 |
-|--------|----------|
-| 智谱 AI | https://open.bigmodel.cn/usercenter/apikeys |
-| OpenAI | https://platform.openai.com/api-keys |
-| Anthropic | https://console.anthropic.com/settings/keys |
-| Gemini | https://makersuite.google.com/app/apikey |
-
----
-
-## 🔍 MCP 范围说明
-
-Claude Code 支持 MCP 服务器的三种配置范围：
-
-| 范围 | 命令参数 | 存储位置 | 可用性 | 推荐场景 |
-|------|----------|----------|--------|----------|
-| **本地** | `--scope local` (默认) | `~/.claude.json` 项目路径 | 仅当前项目目录 | ⚠️ 不推荐 |
-| **项目** | `--scope project` | `.mcp.json` (项目根目录) | 团队共享 | 团队协作 |
-| **用户** | `--scope user` | `~/.claude.json` 用户配置 | ✅ 所有项目 | ✅ 推荐 |
-
-**推荐**：对于个人开发工具（如 aurai-advisor），使用 `--scope user` 确保在任何项目中都可用。
-
----
-
-**完成！** 🎉 现在重启 Claude Code 后即可在所有项目中使用 aurai-advisor。
+- [README](../README.md)
+- [用户手册](用户手册.md)
+- [开发文档](开发文档.md)

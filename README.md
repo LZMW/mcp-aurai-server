@@ -1,258 +1,196 @@
-# 上级顾问 MCP (Aurai Advisor)
+# 上级顾问 MCP（Aurai Advisor）
 
-> 让本地 AI 获取远程 AI 指导的 MCP 服务器
+> 让本地 AI 在遇到复杂编程问题时，向远程大模型继续请教的 MCP 服务。
 
-**版本**: v2.2.0 (重构与文件上传修复)
-**状态**: [OK] 生产就绪
-**发布日期**: 2026-01-24
-**优化模型**: GLM-4.7 (智谱 AI)
+当前仓库对应的是“可长期使用”的版本，已经补齐了这些关键能力：
 
----
-
-## 功能特点
-
-- [OK] **多轮对话机制** - 智能追问，逐步解决问题
-- [OK] **智能对话管理** - 自动检测新问题并清空历史，确保干净的上下文
-- [OK] **智能工具引导** - 工具描述中包含相关工具推荐
-- [OK] **文件上传支持** ⭐ - 支持通过 `sync_context` 上传文件，大文件自动分批发送
-- [OK] **GLM-4.7 优化** - 基于 GLM-4.7 模型参数硬编码优化（200K 上下文）
-- [OK] **对话历史持久化** - 自动保存到用户目录
-- [OK] **GUI 配置工具** - 可视化配置生成
+- 多轮咨询与进度回报
+- `sync_context` 文件同步
+- 代码/配置文件自动转文本上传
+- 会话隔离（`session_id`）
+- 历史持久化、文件锁、原子写入
+- 历史自动摘要
+- 上下文窗口裁剪
 
 ---
 
-## v2.2.0 更新说明
+## 适合做什么
 
-### ⚠️ 重要：旧版用户迁移指南
+这个 MCP 适合放在 Claude Code 或其他支持 stdio 方式的 MCP 客户端里使用。
 
-如果您已经安装了 **v2.1.x 或更早版本**，请注意以下迁移事项：
+典型场景：
 
-#### 情况 1：使用 `custom` provider（OpenAI 兼容 API）的用户 ✅
+- 本地 AI 已经尝试过，但问题还是没解开
+- 需要把报错、代码、文档、配置一起交给“上级顾问”
+- 希望让复杂排查变成“提问 -> 执行 -> 汇报 -> 下一步”的多轮流程
 
-**好消息**：无需重新安装或重新配置！
+---
+
+## 功能概览
+
+- `consult_aurai`
+  主要咨询工具。提交问题、代码片段、上下文、已尝试方案，获取上级顾问的分析和下一步建议。
+
+- `sync_context`
+  同步代码和文档上下文。
+  现在不只支持 `.txt/.md`，还会自动把 `.py/.js/.ts/.json/.yaml/.toml/.ini` 等文本文件转成适合发送的文本内容。
+
+- `report_progress`
+  把执行结果回报给上级顾问，继续下一轮迭代。
+
+- `get_status`
+  查看当前会话状态、历史数量、模型与历史文件路径。
+
+---
+
+## 安装说明
+
+更详细的安装步骤见：
+
+- [Claude Code 安装指南](docs/CLAUDE_CODE_INSTALL.md)
+- [用户手册](docs/用户手册.md)
+
+这里先给一份最常用的安装流程。
+
+### 1. 准备环境
 
 ```bash
-# 只需升级版本即可
-cd D:\mcp-aurai-server
-git pull origin main
-pip install -e ".[all-dev]"
+# 需要 Python 3.10+
+python --version
 
-# 重启 Claude Code，自动生效
+# 进入仓库目录
+cd G:\codex\mcp-aurai-server
 ```
 
-- ✅ 新的环境变量（`AURAI_CONTEXT_WINDOW`、`AURAI_MAX_MESSAGE_TOKENS`、`AURAI_MAX_TOKENS`）是**可选的**
-- ✅ 默认值已针对 GLM-4.7 优化（200K 上下文）
-- ✅ 文件上传修复是透明的，会自动生效
-
-#### 情况 2：使用 `zhipu`、`openai`、`anthropic`、`gemini` provider 的用户 ❌
-
-**需要迁移**：v2.2.0 移除了这些 provider，需要切换到 `custom` + OpenAI 兼容 API。
-
-**迁移步骤（以智谱 AI 为例）**：
+### 2. 创建虚拟环境并安装依赖
 
 ```bash
-# 1. 删除旧配置
-claude mcp remove aurai-advisor -s user
-
-# 2. 重新添加（使用 custom provider）
-claude mcp add --scope user --transport stdio aurai-advisor \
-  --env AURAI_API_KEY="your-api-key" \
-  --env AURAI_BASE_URL="https://open.bigmodel.cn/api/paas/v4/" \
-  --env AURAI_MODEL="glm-4.7" \
-  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
-
-# 3. 重启 Claude Code
-```
-
-**各服务商迁移配置**：
-
-| 原提供商 | 新 AURAI_BASE_URL | 推荐模型 |
-|---------|------------------|---------|
-| `zhipu` | `https://open.bigmodel.cn/api/paas/v4/` | `glm-4.7` |
-| `openai` | `https://api.openai.com/v1` | `gpt-4o` |
-| `anthropic` | 需使用第三方兼容 API | - |
-| `gemini` | 需使用第三方兼容 API | - |
-
-> **提示**：升级后，建议运行 `python .ai_temp/test_file_upload_fix.py` 验证文件上传功能是否正常。
-
----
-
-### 重大变更
-
-1. **简化服务商支持**
-   - ✅ 只保留 `custom` provider（OpenAI 兼容 API）
-   - ❌ 移除 zhipu、openai、anthropic、gemini 直接支持
-   - ✅ 所有兼容 OpenAI API 的服务均可使用
-
-2. **文件上传功能修复** ⭐
-   - ✅ 修复 `sync_context` 文件内容未发送给上级 AI 的问题
-   - ✅ 大文件自动分批发送（超过 `max_message_tokens` 时）
-   - ✅ 动态 Token 估算，根据配置自动调整
-
-3. **GLM-4.7 模型优化** 🎯
-   - ✅ 基于 GLM-4.7 模型参数设置默认值
-   - ✅ 上下文窗口：200,000 tokens（默认）
-   - ✅ 单条消息上限：150,000 tokens（默认）
-   - ✅ 最大输出：32,000 tokens（默认）
-   - ✅ 支持通过环境变量覆盖（适用于其他模型）
-
----
-
-## GLM-4.7 Token 配置说明
-
-本版本采用 **GLM-4.7** 模型参数作为默认值，同时支持通过环境变量覆盖（适用于其他模型）：
-
-| 配置项 | 默认值 | 环境变量 | 说明 |
-|--------|-------|----------|------|
-| `context_window` | 200,000 | `AURAI_CONTEXT_WINDOW` | GLM-4.7 上下文窗口上限 |
-| `max_message_tokens` | 150,000 | `AURAI_MAX_MESSAGE_TOKENS` | 单条文件消息上限 |
-| `max_tokens` | 32,000 | `AURAI_MAX_TOKENS` | 上级 AI 最大输出长度 |
-
-**Token 分配策略**：
-```
-200K (总上下文)
-├── 32K (输出) - 上级 AI 的分析回复
-└── 168K (输入)
-    ├── ~18K (系统 + 历史 + 问题)
-    ├── 150K (最大单条文件)
-    └── ~ - 安全边际
-```
-
-**容量参考**：
-- 单文件上传上限：~15-20 万中文字符
-- 上级 AI 输出上限：~2-3 万中文字符
-- 对话历史：约 10-15 轮完整对话
-
-> **注意**：默认值基于 GLM-4.7 优化，使用其他模型时可通过环境变量调整。
-
----
-
-## 快速开始
-
-### 1. 安装
-
-```bash
-# 进入项目目录
-cd mcp-aurai-server
-
-# 创建虚拟环境
 python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
-
-# 安装依赖
+venv\Scripts\activate
 pip install -e ".[all-dev]"
-
-# 验证安装
-python .ai_temp/test_file_upload_fix.py
-# 预期: ✅ 所有测试通过！
 ```
 
-### 2. 配置
-
-**重要**: 使用 `--scope user` 确保在所有项目中都可用。
+### 3. 在 Claude Code 中注册 MCP
 
 ```bash
-claude mcp add --scope user --transport stdio aurai-advisor \
-  --env AURAI_API_KEY="your-api-key" \
-  --env AURAI_BASE_URL="https://api.example.com/v1" \
-  --env AURAI_MODEL="gpt-4o" \
-  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+claude mcp add --scope user --transport stdio aurai-advisor ^
+  --env AURAI_API_KEY="your-api-key" ^
+  --env AURAI_BASE_URL="https://api.example.com/v1" ^
+  --env AURAI_MODEL="gpt-4o" ^
+  -- "G:\codex\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
 ```
 
-### 3. 使用
+说明：
 
-重启 Claude Code 后，在对话中直接描述编程问题：
+- `AURAI_BASE_URL` 必须是 OpenAI 兼容接口地址
+- 当前版本只保留 `custom` 方式，不再使用旧的 `AURAI_PROVIDER`
+- `--scope user` 表示在所有项目里都可用，最省心
 
+### 4. 验证安装
+
+```bash
+claude mcp list
+pytest
 ```
-我遇到了一个 KeyError 问题，错误信息是 'api_key' not found
-相关代码如下：
-[粘贴代码]
-```
 
-AI 会自动判断是否调用 `consult_aurai` 工具。
+预期：
+
+- `claude mcp list` 能看到 `aurai-advisor`
+- `pytest` 通过
 
 ---
 
-## MCP 工具
+## 快速使用
 
-### consult_aurai（主要工具）
-请求上级 AI 指导解决编程问题
+### 场景 1：直接咨询问题
 
-**参数**:
-- `problem_type`: 问题类型（runtime_error/syntax_error/design_issue/other）
-- `error_message`: 错误描述
-- `code_snippet`: 代码片段（可选）
-- `context`: 上下文信息（可选）
-- `is_new_question`: 是否为新问题（可选，默认false）
-
-**返回**: 上级 AI 的分析和建议
-
-**🔗 相关工具**:
-- **sync_context**：上传文档或代码文件（支持 .md 和 .txt）
-- **report_progress**：报告执行进度并获取下一步指导
-- **get_status**：查看当前对话状态、配置信息
-
-**对话历史管理**:
-- **自动清空**: 当上级AI返回 `resolved=true` 时，自动清空对话历史
-- **手动清空**: 设置 `is_new_question=true` 强制清空历史
-- **历史限制**: 最多保存50条历史记录
-
-### sync_context ⭐
-同步代码上下文，上传文件供上级 AI 阅读
-
-**参数**:
-- `operation`: 操作类型（full_sync/incremental/clear）
-- `files`: 文件路径列表（支持 .txt 和 .md）
-- `project_info`: 项目信息字典（可选）
-
-**功能特性**:
-- 📄 支持上传 Markdown 和文本文件
-- 🔄 大文件自动分批发送（避免超出 Token 限制）
-- 📏 智能 Token 估算（中文 1.5字/token，英文 4字/token）
-
-**典型使用场景**:
 ```python
-# 场景 1: 上传代码文件（避免截断）
-shutil.copy('main.py', 'main.txt')  # 转换为 .txt
-sync_context(
-    operation='incremental',
-    files=['main.txt'],
-    project_info={'language': 'Python'}
-)
-
-# 场景 2: 上传文档供评审
-sync_context(
-    operation='full_sync',
-    files=['README.md', 'docs/设计文档.md'],
-    project_info={'task': 'code_review'}
+consult_aurai(
+    problem_type="runtime_error",
+    error_message="启动时报 KeyError: api_key",
+    code_snippet="config = load_config()\napi_key = config['api_key']",
+    context={
+        "file_path": "src/config.py",
+        "terminal_output": "Traceback ...",
+    }
 )
 ```
 
-### report_progress
-报告执行进度
+### 场景 2：先上传代码文件，再咨询
 
-**参数**:
-- `actions_taken`: 已执行的行动
-- `result`: 执行结果（success/failed/partial）
+```python
+sync_context(
+    operation="incremental",
+    files=["src/main.py", "config/settings.json", "README.md"],
+    project_info={
+        "project_name": "My Project",
+        "tech_stack": "Python + FastAPI"
+    }
+)
 
-### get_status
-获取当前状态
+consult_aurai(
+    problem_type="runtime_error",
+    error_message="请结合已同步文件帮我排查启动失败"
+)
+```
 
-**返回**:
-- 对话历史数量
-- 模型配置
-- Token 限制配置
+注意：
+
+- 不需要再手动把 `main.py` 复制成 `main.txt`
+- 文本代码文件会自动转成文本发送
+- 二进制文件会被跳过
+
+### 场景 3：多问题并行，使用会话隔离
+
+```python
+consult_aurai(
+    problem_type="runtime_error",
+    error_message="问题 A",
+    session_id="issue-a"
+)
+
+consult_aurai(
+    problem_type="design_issue",
+    error_message="问题 B",
+    session_id="issue-b"
+)
+```
+
+这能避免不同问题互相串台。
 
 ---
 
-## 文档
+## sync_context 文件上传规则
 
-| 文档 | 说明 |
-|------|------|
-| [用户手册](docs/用户手册.md) | 完整使用指南 |
-| [安装指南](docs/CLAUDE_CODE_INSTALL.md) | Claude Code 专用安装 |
-| [开发文档](docs/开发文档.md) | 技术细节和架构 |
+### 会直接发送的
+
+- `.md`、`.markdown`、`.mdx`
+- `.txt`
+- 各类代码与配置文本文件，例如：
+  - `.py` `.js` `.ts` `.tsx`
+  - `.json` `.yaml` `.yml` `.toml`
+  - `.ini` `.cfg` `.env`
+  - `.java` `.go` `.rs` `.cpp` `.cs`
+
+### 会自动转换的
+
+- 不是 `.txt/.md`，但内容是文本的文件
+- 会自动生成一个 `.txt` 或 `.md` 的发送名
+- 会在内容前附带“原始文件路径”和“自动转换后的发送名”
+
+### 会跳过的
+
+- 图片
+- 压缩包
+- 音视频
+- 可执行文件
+- 明显的二进制内容
+
+如果一批文件里既有代码又有图片：
+
+- 代码照常上传
+- 图片会被记为 `skipped_files`
+- 整次同步仍然成功
 
 ---
 
@@ -260,179 +198,101 @@ sync_context(
 
 ### 必填
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `AURAI_API_KEY` | API 密钥 | `sk-xxx` |
-| `AURAI_BASE_URL` | API 地址 | `https://open.bigmodel.cn/api/paas/v4/` |
-| `AURAI_MODEL` | 模型名称 | `glm-4.7` |
+| 变量 | 说明 |
+|------|------|
+| `AURAI_API_KEY` | API 密钥 |
+| `AURAI_BASE_URL` | OpenAI 兼容接口地址 |
+| `AURAI_MODEL` | 模型名称 |
 
-### 可选
+### 常用可选项
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `AURAI_TEMPERATURE` | 温度参数（0.0-2.0） | `0.7` |
-| `AURAI_MAX_HISTORY` | 对话历史最大保存数 | `50` |
-| `AURAI_CONTEXT_WINDOW` | 上下文窗口大小（tokens） | `200000`（基于 GLM-4.7） |
-| `AURAI_MAX_MESSAGE_TOKENS` | 单条消息最大 tokens | `150000` |
-| `AURAI_MAX_TOKENS` | 最大输出 tokens | `32000` |
-
-### Token 配置说明
-
-**默认值（基于 GLM-4.7）**：
-- `context_window`: 200,000 tokens
-- `max_message_tokens`: 150,000 tokens
-- `max_tokens`: 32,000 tokens
-
-**其他模型参考**：
-- Claude 3.5 Sonnet: 200,000 / 140,000 / 64,000
-- GPT-4o: 128,000 / 100,000 / 32,000
-- DeepSeek: 64,000 / 50,000 / 16,000
-
-### 配置示例
-
-```bash
-# 使用智谱 AI GLM-4.7（推荐，使用默认值）
-AURAI_API_KEY=your-api-key
-AURAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
-AURAI_MODEL=glm-4.7
-# Token 配置使用默认值，无需设置
-
-# 使用 Claude 3.5 Sonnet（调整 Token 配置）
-AURAI_API_KEY=your-api-key
-AURAI_BASE_URL=https://api.anthropic.com
-AURAI_MODEL=claude-3-5-sonnet-20241022
-AURAI_CONTEXT_WINDOW=200000
-AURAI_MAX_MESSAGE_TOKENS=140000
-AURAI_MAX_TOKENS=64000
-
-# 使用 DeepSeek（调整 Token 配置）
-AURAI_API_KEY=your-api-key
-AURAI_BASE_URL=https://api.deepseek.com/v1
-AURAI_MODEL=deepseek-chat
-AURAI_CONTEXT_WINDOW=64000
-AURAI_MAX_MESSAGE_TOKENS=50000
-AURAI_MAX_TOKENS=16000
-
-# 使用其他兼容 API
-AURAI_API_KEY=your-key
-AURAI_BASE_URL=https://your-api.com/v1
-AURAI_MODEL=your-model
-# 根据模型规格调整 Token 配置
-```
+| `AURAI_TEMPERATURE` | 温度 | `0.7` |
+| `AURAI_MAX_ITERATIONS` | 最大迭代轮数 | `10` |
+| `AURAI_MAX_HISTORY` | 每个会话保留的历史条数上限 | `50` |
+| `AURAI_CONTEXT_WINDOW` | 总上下文窗口大小 | `200000` |
+| `AURAI_MAX_MESSAGE_TOKENS` | 单条大文件消息大小上限 | `150000` |
+| `AURAI_MAX_TOKENS` | 最大输出长度 | `32000` |
+| `AURAI_LOG_LEVEL` | 日志级别 | `INFO` |
+| `AURAI_ENABLE_PERSISTENCE` | 是否持久化历史 | `true` |
+| `AURAI_HISTORY_PATH` | 默认会话历史文件路径 | `~/.mcp-aurai/history.json` |
+| `AURAI_HISTORY_LOCK_TIMEOUT` | 历史文件锁等待时间（秒） | `10` |
+| `AURAI_ENABLE_HISTORY_SUMMARY` | 是否启用历史摘要 | `true` |
+| `AURAI_HISTORY_SUMMARY_KEEP_RECENT` | 摘要后保留的最近原始轮数 | `3` |
+| `AURAI_HISTORY_SUMMARY_TRIGGER` | 触发摘要的原始记录阈值 | `8` |
 
 ---
 
-## 项目结构
+## 当前版本的关键行为
 
-```
-mcp-aurai-server/
-├── src/mcp_aurai/          # MCP Server 源代码
-│   ├── server.py           # 主服务器（4个工具）
-│   ├── config.py           # 配置管理
-│   ├── llm.py              # OpenAI 兼容客户端
-│   ├── prompts.py          # 提示词模板
-│   └── utils.py            # 工具函数
-│
-├── tools/
-│   └── control_center.py   # GUI 配置工具
-│
-├── tests/                  # 测试用例
-│   ├── test_server.py
-│   ├── test_llm.py
-│   └── test_config.py
-│
-├── docs/                   # 文档
-│   ├── 用户手册.md
-│   ├── CLAUDE_CODE_INSTALL.md
-│   └── 开发文档.md
-│
-├── README.md               # 本文件
-├── pyproject.toml          # 项目配置
-└── .env.example            # 环境变量示例
-```
+### 1. 会话隔离
 
----
+- 每个 `session_id` 都有各自的历史
+- 默认不传时使用 `default`
+- 不同会话会落到不同历史文件，避免串会话
 
-## 故障排查
+### 2. 历史摘要
 
-### 每次打开 Claude Code 都要重新安装？
+- 较早历史会自动压成一条“历史摘要”
+- 最近几轮和最近一次 `sync_context` 会尽量保留原样
+- 这样能减少上下文占用，给当前问题腾空间
 
-**原因**：使用了本地范围（local），只在特定目录可用。
+### 3. 上下文窗口裁剪
 
-**解决方案**：使用 `--scope user` 重新安装
+- 会优先保留系统提示
+- 优先保留最近一次 `sync_context`
+- 再尽量保留最近历史轮次
+- 必要时自动收缩本次输出长度，避免总窗口超限
 
-```bash
-claude mcp remove aurai-advisor -s local
-claude mcp add --scope user ...
-```
+### 4. 历史文件更稳
 
-### MCP 工具没有出现
-
-```bash
-claude mcp list                          # 检查配置
-claude mcp remove aurai-advisor -s local # 删除旧配置
-claude mcp add --scope user ...          # 重新添加
-```
-
-### ModuleNotFoundError
-
-```bash
-cd D:\mcp-aurai-server
-python -m venv venv                      # 创建虚拟环境
-venv\Scripts\activate
-pip install -e ".[all-dev]"              # 安装项目
-```
-
-### 401 Unauthorized
-- 检查 API 密钥是否正确
-- 访问提供商平台重新生成密钥
-
-### 404 Model not found
-- 检查模型名称拼写
-- 使用提供商 API 确认可用模型
-
-### 文件内容未发送给上级 AI
-- 确保 `sync_context` 调用成功
-- 查看日志中的 "文件已拆分为 X 个片段" 消息
-- 检查 `AURAI_MAX_MESSAGE_TOKENS` 配置
+- 保存历史时使用锁文件避免并发写坏
+- 写入采用临时文件再替换，避免留下半截 JSON
 
 ---
 
 ## 测试
 
 ```bash
-# 运行文件上传功能测试
-python .ai_temp/test_file_upload_fix.py
-
-# 运行所有测试
-pytest tests/ -v
-
-# 运行特定测试
-pytest tests/test_server.py -v
-pytest tests/test_llm.py -v
-pytest tests/test_config.py -v
-
-# 查看测试覆盖率
-pytest tests/ --cov=src/mcp_aurai --cov-report=html
+pytest
 ```
 
----
+当前主线覆盖的重点包括：
 
-## 获取帮助
-
-- **用户手册**: [docs/用户手册.md](docs/用户手册.md)
-- **安装指南**: [docs/CLAUDE_CODE_INSTALL.md](docs/CLAUDE_CODE_INSTALL.md)
-- **开发文档**: [docs/开发文档.md](docs/开发文档.md)
-
----
-
-## 许可证
-
-MCP Aurai Server 双重许可协议
+- 历史清空与持久化
+- 会话隔离
+- 自动文本转换上传
+- 历史锁与原子写
+- 历史摘要
+- 上下文窗口裁剪
 
 ---
 
-**项目名称**: mcp-aurai-server
-**版本**: v2.2.0
-**状态**: [OK] 生产就绪
-**发布日期**: 2026-01-24
+## 文档
+
+- [Claude Code 安装指南](docs/CLAUDE_CODE_INSTALL.md)
+- [用户手册](docs/用户手册.md)
+- [开发文档](docs/开发文档.md)
+
+---
+
+## 常见问题
+
+### 为什么上级顾问没收到我上传的代码文件？
+
+旧版本要求先手动转成 `.txt`。当前版本已经支持自动转换文本文件。
+
+如果还是没收到，优先检查：
+
+- 文件路径是否存在
+- 文件是不是二进制
+- `sync_context` 返回里的 `uploaded_files` / `skipped_files`
+
+### 为什么不同问题会互相影响？
+
+如果你希望完全隔离，给不同问题传不同 `session_id`。
+
+### 为什么历史文件看起来变短了？
+
+这是历史摘要在工作。旧历史被压成纪要，不是丢了，而是换成更省上下文的“会议纪要”。

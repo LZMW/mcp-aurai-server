@@ -206,8 +206,8 @@ claude mcp add --scope user --transport http github \
 # Stdio 服务器（用户范围，带环境变量）
 claude mcp add --scope user --transport stdio aurai-advisor \
   --env AURAI_API_KEY=sk-xxx \
-  --env AURAI_PROVIDER=custom \
   --env AURAI_BASE_URL=https://api.com/v1 \
+  --env AURAI_MODEL=gpt-4o \
   -- "D:\project\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
 ```
 
