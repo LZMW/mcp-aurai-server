@@ -15,6 +15,21 @@ MAX_TOKENS_BEFORE_FILE = 800
 # 临时文件目录
 TEMP_DIR = Path(tempfile.gettempdir()) / "mcp_aurai_files"
 
+# 可直接按 Markdown 发送的扩展名
+MARKDOWN_EXTENSIONS = {".md", ".markdown", ".mdx"}
+
+# 明显的二进制扩展名
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".svgz",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".zip", ".rar", ".7z", ".tar", ".gz",
+    ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".mp3", ".wav", ".flac", ".mp4", ".mov", ".avi", ".mkv",
+}
+
+# 文本文件常见编码尝试顺序
+TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "gb18030", "utf-16")
+
 
 def estimate_tokens(text: str) -> int:
     """
@@ -100,6 +115,103 @@ def cleanup_temp_files():
         logger.info(f"已清理临时文件目录: {TEMP_DIR}")
     except Exception as e:
         logger.warning(f"清理临时文件失败: {e}")
+
+
+def _looks_like_binary_content(data: bytes) -> bool:
+    """粗略判断文件内容是否像二进制。"""
+    if not data:
+        return False
+
+    sample = data[:4096]
+    if b"\x00" in sample:
+        return True
+
+    non_text_bytes = 0
+    for byte in sample:
+        if byte in (9, 10, 13):  # \t \n \r
+            continue
+        if 32 <= byte <= 126 or byte >= 128:
+            continue
+        non_text_bytes += 1
+
+    return non_text_bytes / len(sample) > 0.3
+
+
+def _decode_text_content(data: bytes) -> tuple[str, str]:
+    """尝试用常见编码解码文本内容。"""
+    for encoding in TEXT_ENCODINGS:
+        try:
+            return data.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+
+    return data.decode("utf-8", errors="replace"), "utf-8(replace)"
+
+
+def _build_sync_target_path(original_path: str) -> tuple[str, bool]:
+    """生成发送给上级顾问的目标文件名。"""
+    path = Path(original_path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".txt":
+        return original_path, False
+
+    if suffix in MARKDOWN_EXTENSIONS:
+        return str(path.with_suffix(".md")), suffix != ".md"
+
+    return f"{original_path}.txt", True
+
+
+def prepare_file_for_sync(file_path: str) -> dict[str, Any]:
+    """
+    为 sync_context 准备文件内容。
+
+    - `.md/.txt` 直接读取
+    - 代码/配置等文本文件自动转成 `.txt/.md` 的发送名
+    - 明显的二进制文件跳过
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        return {
+            "status": "missing",
+            "original_path": file_path,
+            "reason": "文件不存在",
+        }
+
+    if path.suffix.lower() in BINARY_EXTENSIONS:
+        return {
+            "status": "binary",
+            "original_path": file_path,
+            "reason": "二进制文件不支持同步",
+        }
+
+    data = path.read_bytes()
+    if _looks_like_binary_content(data):
+        return {
+            "status": "binary",
+            "original_path": file_path,
+            "reason": "检测到二进制内容，无法作为文本发送",
+        }
+
+    content, encoding = _decode_text_content(data)
+    target_path, auto_converted = _build_sync_target_path(file_path)
+
+    if auto_converted:
+        content = (
+            f"[原始文件: {file_path}]\n"
+            f"[自动转换后发送名: {target_path}]\n\n"
+            + content
+        )
+
+    return {
+        "status": "ok",
+        "original_path": file_path,
+        "target_path": target_path,
+        "content": content,
+        "encoding": encoding,
+        "auto_converted": auto_converted,
+    }
 
 
 def optimize_context_for_sync(

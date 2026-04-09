@@ -18,7 +18,7 @@ from pydantic import Field
 from .config import get_aurai_config, get_server_config
 from .llm import get_aurai_client
 from .prompts import build_consult_prompt, build_progress_prompt
-from .utils import optimize_context_for_sync
+from .utils import optimize_context_for_sync, prepare_file_for_sync
 
 # 配置日志
 server_config = get_server_config()
@@ -536,15 +536,12 @@ async def consult_aurai(
     如果 `code_snippet` 或 `context` 内容过长，**请使用 `sync_context` 上传文件**：
 
     ```python
-    # 步骤 1：将代码文件复制为 .txt
-    shutil.copy('script.py', 'script.txt')
+    # 步骤 1：直接上传代码文件（会自动转成文本发送）
+    sync_context(operation='incremental', files=['script.py'])
 
-    # 步骤 2：上传文件
-    sync_context(operation='incremental', files=['script.txt'])
-
-    # 步骤 3：告诉上级顾问文件已上传
+    # 步骤 2：告诉上级顾问文件已上传
     consult_aurai(
-        error_message='请审查已上传的 script.txt 文件'
+        error_message='请审查已上传的 script.py 文件'
     )
     ```
 
@@ -774,7 +771,7 @@ async def sync_context(
     ),
     files: Any = Field(
         default=None,
-        description="**⚠️ 只支持 .txt 和 .md 文件！** 如需上传代码文件（.py/.js/.json等），必须先复制为 .txt。示例: shutil.copy('script.py', 'script.txt') 然后传 files=['script.txt']。文件路径列表（支持 JSON 字符串或列表，会自动解析）"
+        description="文件路径列表（支持 JSON 字符串或列表，会自动解析）。`.md/.txt` 会直接上传，代码/配置等文本文件会自动转换为 `.txt/.md` 后发送给上级顾问；明显的二进制文件会被跳过。"
     ),
     project_info: Any = Field(
         default=None,
@@ -816,27 +813,21 @@ async def sync_context(
 
     ```python
     # 问题：代码太长，在 context 字段中可能被截断
-    # 解决：将代码转换为 .txt 文件后上传
-
-    import shutil
-
-    # 步骤 1：将代码文件复制为 .txt
-    shutil.copy('src/main.py', 'src/main.txt')
-
-    # 步骤 2：上传文件
+    # 解决：直接上传代码文件，系统会自动转成文本发送给上级顾问
+    # 步骤 1：上传文件
     sync_context(
         operation='incremental',
-        files=['src/main.txt'],
+        files=['src/main.py'],
         project_info={
             'description': '需要调试的代码',
             'language': 'Python'
         }
     )
 
-    # 步骤 3：告诉上级顾问文件已上传
+    # 步骤 2：告诉上级顾问文件已上传
     consult_aurai(
         problem_type='runtime_error',
-        error_message='请审查已上传的 src/main.txt 文件，帮我找出bug',
+        error_message='请审查已上传的 src/main.py 文件，帮我找出bug',
         context={
             'file_location': '已通过 sync_context 上传',
             'expected_behavior': '应该输出...',
@@ -867,10 +858,10 @@ async def sync_context(
 
     ## [注意] 文件上传限制
 
-    **files 参数只支持 .txt 和 .md 文件！**
+    **files 参数优先支持文本文件，会自动转换代码/配置文件为文本发送！**
 
-    - [OK] 支持：`README.md`, `docs.txt`, `notes.md` 等文本和Markdown文件
-    - [X] 不支持：`.py`, `.js`, `.json`, `.yaml` 等代码文件
+    - [OK] 支持：`README.md`, `docs.txt`, `notes.md`, `main.py`, `config.json`, `docker-compose.yml` 等文本内容
+    - [X] 跳过：图片、压缩包、可执行文件等明显二进制文件
 
     ## 使用场景
 
@@ -888,7 +879,7 @@ async def sync_context(
     ## 参数说明
 
     - `operation`: 操作类型（full_sync/incremental/clear）
-    - `files`: 文件路径列表，**只能是 .txt 或 .md 文件**
+    - `files`: 文件路径列表，文本/代码文件会自动转换为 `.txt/.md` 发送
     - `project_info`: 项目信息字典，可包含任意字段
     """
     normalized_session_id = _normalize_session_id(session_id)
@@ -943,8 +934,9 @@ async def sync_context(
         # 将临时文件添加到文件列表中，以便读取
         all_files = parsed_files + temp_files
 
-        # 读取文件内容（.txt 和 .md 文件）
+        # 读取文件内容（文本文件会自动转成 .txt/.md 的发送名）
         file_contents: dict[str, str] = {}
+        uploaded_files: list[dict[str, Any]] = []
 
         # 先添加大内容（从缓存文件中读取）
         file_contents.update(large_contents_map)
@@ -952,52 +944,76 @@ async def sync_context(
         # 再读取用户提供的文件
         skipped_files = []  # 记录跳过的文件
         for file_path in parsed_files:
-            path = Path(file_path)
+            try:
+                prepared = prepare_file_for_sync(file_path)
+            except Exception as e:
+                logger.error(f"[错误] 预处理文件失败 {file_path}: {e}")
+                skipped_files.append({
+                    "path": file_path,
+                    "reason": f"预处理失败: {e}",
+                })
+                continue
 
-            # [注意] 限制：只读取 .txt 和 .md 文件
-            if path.suffix.lower() in ['.txt', '.md']:
-                try:
-                    if path.exists():
-                        content = path.read_text(encoding='utf-8')
-                        file_contents[file_path] = content
-                        logger.info(f"[读取] 已读取文件: {file_path} ({len(content)} 字符)")
-                    else:
-                        logger.warning(f"[错误] 文件不存在: {file_path}")
-                except Exception as e:
-                    logger.error(f"[错误] 读取文件失败 {file_path}: {e}")
+            if prepared["status"] == "ok":
+                target_path = prepared["target_path"]
+                content = prepared["content"]
+                file_contents[target_path] = content
+                uploaded_files.append({
+                    "original_path": prepared["original_path"],
+                    "sent_as_path": target_path,
+                    "encoding": prepared["encoding"],
+                    "auto_converted": prepared["auto_converted"],
+                })
+                logger.info(
+                    "[读取] 已读取文件: %s -> %s (%s 字符，编码: %s，自动转换: %s)",
+                    prepared["original_path"],
+                    target_path,
+                    len(content),
+                    prepared["encoding"],
+                    prepared["auto_converted"],
+                )
             else:
-                # 不支持的文件类型
-                logger.warning(f"[跳过] 跳过不支持的文件类型: {file_path} (仅支持 .txt 和 .md)")
-                skipped_files.append(file_path)
+                reason = prepared.get("reason", "未知原因")
+                logger.warning(f"[跳过] 跳过文件: {file_path} ({reason})")
+                skipped_files.append({
+                    "path": file_path,
+                    "reason": reason,
+                })
 
-        # 如果有跳过的文件，记录警告
         if skipped_files:
-            logger.warning(f"[跳过] 共跳过 {len(skipped_files)} 个不支持的文件（仅支持 .txt 和 .md）: {skipped_files}")
+            logger.warning(f"[跳过] 共跳过 {len(skipped_files)} 个文件: {skipped_files}")
 
         # 记录上下文信息（包含所有文件内容，供上级AI读取）
         entry = {
             "type": "sync_context",
             "operation": operation,
             "files": parsed_files,
+            "uploaded_files": uploaded_files,
             "temp_files": temp_files,  # 记录临时文件
             "file_contents": file_contents,  # 所有文件内容
             "project_info": optimized_project_info or {},
         }
         _add_to_history(entry, normalized_session_id)
 
-        logger.info(f"上下文已同步，文件数: {len(all_files)}，读取文本文件: {len(file_contents)}，创建临时文件: {len(temp_files)}")
+        auto_converted_count = sum(1 for item in uploaded_files if item["auto_converted"])
+        logger.info(
+            "上下文已同步，文件数: %s，成功读取: %s，自动转换: %s，创建临时文件: %s",
+            len(all_files),
+            len(uploaded_files) + len(large_contents_map),
+            auto_converted_count,
+            len(temp_files),
+        )
 
-        # 如果有跳过的文件，返回错误状态
-        if skipped_files:
-            logger.warning(f"[错误] 跳过了不支持的文件类型: {skipped_files}")
+        # 如果一个都没读到，并且存在跳过文件，则返回错误
+        if skipped_files and not uploaded_files and not large_contents_map:
+            logger.warning(f"[错误] 所有文件都未能同步: {skipped_files}")
             return {
                 "status": "error",
-                "message": f"❌ 文件类型不支持，请转换为 .txt 后重试: {skipped_files}",
+                "message": f"❌ 没有可发送给上级顾问的文本文件: {skipped_files}",
                 "skipped_files": skipped_files,
-                "hint": "sync_context 只支持 .txt 和 .md 文件。代码文件请先: shutil.copy('xxx.py', 'xxx.txt')",
-                "supported_types": [".txt", ".md"],
+                "hint": "代码/配置等文本文件现在会自动转成 .txt/.md。若仍失败，通常是文件不存在或文件本身是二进制。",
                 "files_count": len(all_files),
-                "text_files_read": len(file_contents),
+                "text_files_read": len(uploaded_files) + len(large_contents_map),
                 "temp_files_created": len(temp_files),
             }
 
@@ -1005,13 +1021,20 @@ async def sync_context(
         message_parts = [f"上下文已同步 ({operation})"]
         if temp_files:
             message_parts.append(f"{len(temp_files)}个大内容已缓存")
+        if auto_converted_count:
+            message_parts.append(f"{auto_converted_count}个文件已自动转为文本")
+        if skipped_files:
+            message_parts.append(f"{len(skipped_files)}个文件已跳过")
 
         return {
             "status": "success",
             "message": "，".join(message_parts),
             "files_count": len(all_files),
-            "text_files_read": len(file_contents),
+            "text_files_read": len(uploaded_files) + len(large_contents_map),
             "temp_files_created": len(temp_files),
+            "auto_converted_files": [item for item in uploaded_files if item["auto_converted"]],
+            "uploaded_files": uploaded_files,
+            "skipped_files": skipped_files,
             "history_count": len(_get_session_history(normalized_session_id)),
         }
 

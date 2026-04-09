@@ -83,6 +83,79 @@ async def test_sync_context_clear_persists_empty_history(server_module, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_sync_context_auto_converts_code_file_to_text(server_module, tmp_path):
+    server = server_module
+    configure_persistence(server, tmp_path)
+
+    code_file = tmp_path / "main.py"
+    code_file.write_text("print('hello')\n", encoding="utf-8")
+
+    result = await server.sync_context(
+        operation="incremental",
+        files=[str(code_file)],
+        project_info=None,
+        session_id=None,
+    )
+
+    assert result["status"] == "success"
+    assert len(result["auto_converted_files"]) == 1
+    uploaded = result["uploaded_files"][0]
+    assert uploaded["original_path"] == str(code_file)
+    assert uploaded["sent_as_path"].endswith(".txt")
+    assert uploaded["auto_converted"] is True
+
+    latest_entry = server._get_session_history(None)[-1]
+    sent_as_path = uploaded["sent_as_path"]
+    assert sent_as_path in latest_entry["file_contents"]
+    assert "[原始文件:" in latest_entry["file_contents"][sent_as_path]
+    assert "print('hello')" in latest_entry["file_contents"][sent_as_path]
+
+
+@pytest.mark.asyncio
+async def test_sync_context_skips_binary_file_but_keeps_text_file(server_module, tmp_path):
+    server = server_module
+    configure_persistence(server, tmp_path)
+
+    code_file = tmp_path / "worker.js"
+    code_file.write_text("console.log('ok')\n", encoding="utf-8")
+    binary_file = tmp_path / "image.png"
+    binary_file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+    result = await server.sync_context(
+        operation="incremental",
+        files=[str(code_file), str(binary_file)],
+        project_info=None,
+        session_id=None,
+    )
+
+    assert result["status"] == "success"
+    assert len(result["uploaded_files"]) == 1
+    assert len(result["skipped_files"]) == 1
+    assert result["skipped_files"][0]["path"] == str(binary_file)
+    assert "二进制" in result["skipped_files"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_sync_context_returns_error_when_all_files_are_binary(server_module, tmp_path):
+    server = server_module
+    configure_persistence(server, tmp_path)
+
+    binary_file = tmp_path / "archive.zip"
+    binary_file.write_bytes(b"PK\x03\x04\x00\x00\x00\x00")
+
+    result = await server.sync_context(
+        operation="incremental",
+        files=[str(binary_file)],
+        project_info=None,
+        session_id=None,
+    )
+
+    assert result["status"] == "error"
+    assert result["text_files_read"] == 0
+    assert result["skipped_files"][0]["path"] == str(binary_file)
+
+
+@pytest.mark.asyncio
 async def test_consult_resolved_clears_persisted_history(server_module, tmp_path, monkeypatch):
     server = server_module
     history_path = configure_persistence(server, tmp_path)
