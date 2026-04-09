@@ -47,6 +47,7 @@ nul
 temp_files.txt
 test_*.py
 temp_*.py
+!tests/test_*.py
 
 # PyInstaller
 *.spec

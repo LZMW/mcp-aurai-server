@@ -35,6 +35,32 @@ def _get_history() -> list[dict[str, Any]]:
     return _conversation_history[-server_config.max_history:]
 
 
+def _clear_history(reason: str, log_prefix: str = "[历史]") -> int:
+    """
+    清空对话历史，并在启用持久化时立即同步到文件。
+
+    这能避免只清空内存、不更新历史文件，导致服务重启后旧历史“复活”。
+
+    Args:
+        reason: 清空原因，写入日志便于排查
+        log_prefix: 日志前缀
+
+    Returns:
+        清空前的历史条数
+    """
+    history_count = len(_conversation_history)
+    _conversation_history.clear()
+
+    if server_config.enable_persistence:
+        _save_history_to_file()
+
+    logger.info(f"{log_prefix} 对话历史已清空（清除 {history_count} 条记录）")
+    if reason:
+        logger.info(f"   原因: {reason}")
+
+    return history_count
+
+
 def _add_to_history(entry: dict[str, Any]):
     """添加到对话历史"""
     _conversation_history.append(entry)
@@ -295,10 +321,7 @@ async def consult_aurai(
 
     # 执行清空操作
     if should_clear_history:
-        history_count = len(_conversation_history)
-        _conversation_history.clear()
-        logger.info(f"[新问题] 清空对话历史（清除 {history_count} 条记录）")
-        logger.info(f"   原因: {clear_reason}")
+        _clear_history(clear_reason, log_prefix="[新问题]")
         logger.info(f"   新问题: {problem_type} - {error_message[:100]}...")
 
     # 解析 context 参数（支持 JSON 字符串或字典）
@@ -368,9 +391,7 @@ async def consult_aurai(
 
         # 检查问题是否已解决，若解决则清空对话历史
         if response.get("resolved", False):
-            history_count = len(_conversation_history)
-            _conversation_history.clear()
-            logger.info(f"[完成] 问题已解决，已清空对话历史（清除了 {history_count} 条记录）")
+            _clear_history("上级顾问返回 resolved=true", log_prefix="[完成]")
 
         return {
             "status": "success",
@@ -536,8 +557,7 @@ async def sync_context(
 
     if operation == "clear":
         # 清空对话历史
-        _conversation_history.clear()
-        logger.info("对话历史已清空")
+        _clear_history('sync_context(operation="clear")', log_prefix="[sync_context]")
         return {
             "status": "success",
             "message": "对话历史已清空",
@@ -695,9 +715,7 @@ async def report_progress(
 
     # 检查问题是否已解决，若解决则清空对话历史
     if response.get("resolved", False):
-        history_count = len(_conversation_history)
-        _conversation_history.clear()
-        logger.info(f"[完成] 问题已解决，已清空对话历史（清除了 {history_count} 条记录）")
+        _clear_history("report_progress 返回 resolved=true", log_prefix="[完成]")
 
     logger.info(f"report_progress完成，resolved: {response.get('resolved', False)}")
     return response
