@@ -32,4 +32,4 @@ all-dev = ["mcp-aurai-advisor[gui,dev]"]
 packages = ["src/mcp_aurai"]
 
 [tool.gui]
-config_tool = "tools/config_gui.py"
+config_tool = "tools/control_center.py"
