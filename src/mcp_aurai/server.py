@@ -1,10 +1,14 @@
 """MCP服务器主文件 - 上级顾问"""
 
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +39,9 @@ DEFAULT_SESSION_ID = "default"
 _conversation_history: dict[str, list[dict[str, Any]]] = {}
 _loaded_sessions: set[str] = set()
 
+# 历史文件锁的轮询间隔（秒）
+HISTORY_LOCK_RETRY_INTERVAL = 0.05
+
 
 def _normalize_session_id(session_id: str | None) -> str:
     """规范化会话标识，确保旧调用默认落到 default 会话。"""
@@ -64,6 +71,89 @@ def _get_history_file_for_session(session_id: str | None) -> Path:
     return history_file.with_name(
         f"{history_file.stem}.{safe_name}.{digest}{history_file.suffix}"
     )
+
+
+def _get_history_lock_file_for_session(session_id: str | None) -> Path:
+    """获取某个会话的历史锁文件路径。"""
+    history_file = _get_history_file_for_session(session_id)
+    return history_file.with_name(f"{history_file.name}.lock")
+
+
+@contextmanager
+def _history_file_lock(session_id: str | None):
+    """
+    为某个会话的历史文件申请一个轻量级跨进程锁。
+
+    实现方式是独占创建 `.lock` 文件。
+    拿到锁后，其他进程只能等待或超时，避免同时读写把历史文件踩坏。
+    """
+    normalized = _normalize_session_id(session_id)
+    lock_file = _get_history_lock_file_for_session(normalized)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+    deadline = time.monotonic() + server_config.history_lock_timeout
+    lock_fd: int | None = None
+
+    while True:
+        try:
+            lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            os.write(lock_fd, f"{os.getpid()} {normalized}".encode("utf-8"))
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"等待历史文件锁超时: {lock_file}（>{server_config.history_lock_timeout}秒）"
+                )
+            time.sleep(HISTORY_LOCK_RETRY_INTERVAL)
+
+    try:
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                logger.debug("关闭历史文件锁句柄失败: %s", lock_file, exc_info=True)
+        try:
+            lock_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("删除历史文件锁失败: %s", lock_file, exc_info=True)
+
+
+def _write_history_file_atomic(history_file: Path, history: list[dict[str, Any]]):
+    """
+    原子写入历史文件。
+
+    先写入同目录临时文件，再用 replace 一次性替换正式文件，
+    这样即便中途崩掉，也不容易留下半截 JSON。
+    """
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(history, ensure_ascii=False, indent=2)
+
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=history_file.parent,
+            prefix=f".{history_file.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(payload)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_path = Path(temp_file.name)
+
+        os.replace(temp_path, history_file)
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                logger.warning("清理历史临时文件失败: %s", temp_path, exc_info=True)
 
 
 def _ensure_session_loaded(session_id: str | None):
@@ -154,43 +244,44 @@ def _load_history_from_file(session_id: str | None = None) -> list[dict[str, Any
     history_file = _get_history_file_for_session(normalized)
 
     try:
-        # 文件不存在时返回空列表
-        if not history_file.exists():
-            logger.info(f"历史文件不存在: {history_file}")
-            # 创建目录
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            # 创建空文件
-            history_file.write_text("[]", encoding="utf-8")
-            return []
-
-        # 读取并解析JSON
-        content = history_file.read_text(encoding="utf-8")
-        history = json.loads(content)
-
-        if not isinstance(history, list):
-            # 兼容旧版本或其他格式：如果内容是字典，尽量提取对应会话。
-            if isinstance(history, dict):
-                if normalized == DEFAULT_SESSION_ID and isinstance(history.get(DEFAULT_SESSION_ID), list):
-                    history = history[DEFAULT_SESSION_ID]
-                elif isinstance(history.get(normalized), list):
-                    history = history[normalized]
-                elif (
-                    isinstance(history.get("sessions"), dict)
-                    and isinstance(history["sessions"].get(normalized), list)
-                ):
-                    history = history["sessions"][normalized]
-                else:
-                    logger.warning(f"历史文件格式错误,无法识别会话 {normalized!r} 的历史结构")
-                    return []
-            else:
-                logger.warning(f"历史文件格式错误,期望list,实际{type(history)}")
+        with _history_file_lock(normalized):
+            # 文件不存在时返回空列表
+            if not history_file.exists():
+                logger.info(f"历史文件不存在: {history_file}")
+                _write_history_file_atomic(history_file, [])
                 return []
+
+            # 读取并解析JSON
+            content = history_file.read_text(encoding="utf-8")
+            history = json.loads(content)
+
+            if not isinstance(history, list):
+                # 兼容旧版本或其他格式：如果内容是字典，尽量提取对应会话。
+                if isinstance(history, dict):
+                    if normalized == DEFAULT_SESSION_ID and isinstance(history.get(DEFAULT_SESSION_ID), list):
+                        history = history[DEFAULT_SESSION_ID]
+                    elif isinstance(history.get(normalized), list):
+                        history = history[normalized]
+                    elif (
+                        isinstance(history.get("sessions"), dict)
+                        and isinstance(history["sessions"].get(normalized), list)
+                    ):
+                        history = history["sessions"][normalized]
+                    else:
+                        logger.warning(f"历史文件格式错误,无法识别会话 {normalized!r} 的历史结构")
+                        return []
+                else:
+                    logger.warning(f"历史文件格式错误,期望list,实际{type(history)}")
+                    return []
 
         logger.info(f"从文件加载了 {len(history)} 条历史记录，会话: {normalized!r}")
         return history
 
     except json.JSONDecodeError as e:
         logger.error(f"历史文件JSON解析失败: {e}")
+        return []
+    except TimeoutError as e:
+        logger.error(f"获取历史文件锁失败: {e}")
         return []
     except Exception as e:
         logger.error(f"加载历史文件失败: {e}")
@@ -212,17 +303,13 @@ def _save_history_to_file(session_id: str | None = None):
     history = _conversation_history.get(normalized, [])
 
     try:
-        # 确保目录存在
-        history_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # 保存为格式化的JSON(可读性好)
-        history_file.write_text(
-            json.dumps(history, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        with _history_file_lock(normalized):
+            _write_history_file_atomic(history_file, history)
 
         logger.debug(f"已保存会话 {normalized!r} 的 {len(history)} 条历史记录到文件")
 
+    except TimeoutError as e:
+        logger.warning(f"保存历史文件时获取锁失败: {e},继续使用内存模式")
     except Exception as e:
         logger.warning(f"保存历史文件失败: {e},继续使用内存模式")
 

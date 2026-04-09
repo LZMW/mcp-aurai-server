@@ -185,6 +185,14 @@ class ServerConfig(BaseModel):
         description="对话历史文件路径"
     )
 
+    # 历史文件锁超时时间（秒）
+    history_lock_timeout: float = Field(
+        default_factory=lambda: float(os.getenv("AURAI_HISTORY_LOCK_TIMEOUT", "10")),
+        gt=0,
+        le=120,
+        description="历史文件锁超时时间（秒）"
+    )
+
 
 # 全局配置实例
 _config: AuraiConfig | None = None

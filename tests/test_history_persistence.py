@@ -44,6 +44,7 @@ def configure_persistence(server, tmp_path: Path) -> Path:
     history_path = tmp_path / "history.json"
     server.server_config.enable_persistence = True
     server.server_config.history_path = str(history_path)
+    server.server_config.history_lock_timeout = 10.0
     reset_server_state(server)
     server._ensure_session_loaded(server.DEFAULT_SESSION_ID)
     server._save_history_to_file()
@@ -255,3 +256,41 @@ async def test_consult_uses_only_target_session_history(server_module, tmp_path,
     sent_history = recorder["kwargs"]["conversation_history"]
     assert len(sent_history) == 1
     assert sent_history[0]["error_message"] == "alpha-history"
+
+
+def test_history_file_lock_times_out_when_already_held(server_module, tmp_path):
+    server = server_module
+    configure_persistence(server, tmp_path)
+    server.server_config.history_lock_timeout = 0.1
+
+    with server._history_file_lock(None):
+        with pytest.raises(TimeoutError):
+            with server._history_file_lock(None):
+                pass
+
+
+def test_save_history_uses_atomic_replace_and_cleans_temp_files(server_module, tmp_path, monkeypatch):
+    server = server_module
+    history_path = configure_persistence(server, tmp_path)
+
+    original_replace = server.os.replace
+    replace_calls = []
+
+    def tracking_replace(src, dst):
+        replace_calls.append((Path(src), Path(dst)))
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(server.os, "replace", tracking_replace)
+
+    server._add_to_history({
+        "type": "consult",
+        "problem_type": "other",
+        "error_message": "原子写入测试",
+        "response": {"resolved": False},
+    })
+
+    assert replace_calls
+    temp_path, target_path = replace_calls[-1]
+    assert target_path == history_path
+    assert temp_path.suffix == ".tmp"
+    assert not temp_path.exists()
