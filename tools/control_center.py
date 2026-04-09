@@ -59,7 +59,7 @@ class AuraiConfigTool:
 
     def __init__(self, root: Tk):
         self.root = root
-        self.root.title("Aurai 配置工具 v2.0")
+        self.root.title("Aurai 配置工具 v2.3")
         self.root.geometry("1000x700")
 
         # 配置文件路径
@@ -137,6 +137,10 @@ class AuraiConfigTool:
             ("AURAI_MAX_ITERATIONS", "最大迭代次数 (5-20)", "entry", None),
             ("AURAI_MAX_HISTORY", "对话历史最大保存数 (10-100)", "entry", None),
             ("AURAI_TEMPERATURE", "温度参数 (0.0-2.0)", "entry", None),
+            ("AURAI_HISTORY_LOCK_TIMEOUT", "历史文件锁超时（秒，默认 10）", "entry", None),
+            ("AURAI_ENABLE_HISTORY_SUMMARY", "启用历史摘要（true/false）", "entry", None),
+            ("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "摘要后保留最近原始轮次（默认 3）", "entry", None),
+            ("AURAI_HISTORY_SUMMARY_TRIGGER", "触发历史摘要阈值（默认 8）", "entry", None),
         ]
 
         row = 0
@@ -468,6 +472,10 @@ class AuraiConfigTool:
                 f.write("# AURAI_MAX_ITERATIONS      - 最大对话轮数（默认 10）\n")
                 f.write("# AURAI_MAX_HISTORY          - 对话历史最大保存数（默认 50）\n")
                 f.write("# AURAI_TEMPERATURE         - 温度参数 0.0-2.0（默认 0.7）\n")
+                f.write("# AURAI_HISTORY_LOCK_TIMEOUT - 历史文件锁等待时间（秒，默认 10）\n")
+                f.write("# AURAI_ENABLE_HISTORY_SUMMARY - 是否启用历史摘要（默认 true）\n")
+                f.write("# AURAI_HISTORY_SUMMARY_KEEP_RECENT - 摘要后保留最近原始轮次（默认 3）\n")
+                f.write("# AURAI_HISTORY_SUMMARY_TRIGGER - 触发历史摘要阈值（默认 8）\n")
                 f.write("#\n")
                 f.write("# 【以下配置自动管理，无需手动设置】\n")
                 f.write("# AURAI_ENABLE_PERSISTENCE   - 对话历史持久化（自动启用）\n")
@@ -504,6 +512,7 @@ class AuraiConfigTool:
                 f.write("#    在 Claude Code 对话中直接描述编程问题即可\n")
                 f.write("#    例如：\"我遇到了一个 KeyError 问题...\"\n")
                 f.write("#    AI 会自动判断是否调用 consult_aurai 工具\n")
+                f.write("#    sync_context 现在支持直接上传代码/配置等文本文件，无需手动改名成 .txt\n")
                 f.write("#\n")
                 f.write("################################################################################\n")
                 f.write("# 🔧 故障排查指南\n")
@@ -581,6 +590,7 @@ class AuraiConfigTool:
                 f.write("# - 查看完整文档: docs/用户手册.md\n")
                 f.write("# - 提交问题: GitHub Issues\n")
                 f.write("# - 查看日志: 设置 AURAI_LOG_LEVEL=DEBUG\n")
+                f.write("# - 注意：本配置工具目前主要负责生成配置；历史审计界面仍以默认会话历史为主\n")
                 f.write("#\n")
                 f.write("################################################################################\n")
                 f.write("# 配置文件结束\n")
@@ -747,6 +757,13 @@ class AuraiConfigTool:
             "AURAI_CONTEXT_WINDOW": "200000",
             "AURAI_MAX_MESSAGE_TOKENS": "150000",
             "AURAI_MAX_TOKENS": "32000",
+            "AURAI_MAX_ITERATIONS": "10",
+            "AURAI_MAX_HISTORY": "50",
+            "AURAI_TEMPERATURE": "0.7",
+            "AURAI_HISTORY_LOCK_TIMEOUT": "10",
+            "AURAI_ENABLE_HISTORY_SUMMARY": "true",
+            "AURAI_HISTORY_SUMMARY_KEEP_RECENT": "3",
+            "AURAI_HISTORY_SUMMARY_TRIGGER": "8",
         },
     }
 
@@ -824,6 +841,16 @@ DeepSeek: https://api.deepseek.com/v1
 • 单条消息最大：150000 tokens
 • 最大输出：32000 tokens
 使用其他模型时可调整这些值。
+
+【历史能力】
+• 支持历史文件锁与原子写入
+• 支持较早历史自动摘要
+• 可通过下方新增字段调整摘要保留轮次和触发阈值
+
+【文件上传】
+• sync_context 现在可以直接上传代码/配置等文本文件
+• 不再要求手动把 .py / .js / .json 复制成 .txt
+• 图片、压缩包、可执行文件等二进制内容会被跳过
 
 【GLM-4.7 优势】
 • 200K 上下文窗口
