@@ -110,6 +110,10 @@ class AuraiClient:
         logger.info(f"文件 {file_path} 已拆分为 {len(chunks)} 个片段")
         return chunks
 
+    def _serialize_for_message(self, value) -> str:
+        """将结构化数据转换为便于发送给模型的文本。"""
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
     def _build_messages_from_history(
         self,
         conversation_history: list[dict] | None,
@@ -131,6 +135,23 @@ class AuraiClient:
         # 首先处理所有 sync_context 类型的记录（作为 system 消息）
         for turn in conversation_history:
             if turn.get("type") == "sync_context":
+                project_info = turn.get("project_info", {})
+                if project_info:
+                    project_info_text = self._serialize_for_message(project_info)
+                    chunks = self._split_file_content("project_info.json", project_info_text)
+
+                    for idx, chunk in enumerate(chunks):
+                        total = len(chunks)
+                        if total == 1:
+                            header = "## 已同步项目背景\n"
+                        else:
+                            header = f"## 已同步项目背景 ({idx + 1}/{total})\n"
+
+                        messages.append({
+                            "role": "system",
+                            "content": header + f"```json\n{chunk}\n```"
+                        })
+
                 file_contents = turn.get("file_contents", {})
                 if not file_contents:
                     continue

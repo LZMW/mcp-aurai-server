@@ -1,6 +1,18 @@
 """提示词模板模块"""
 
+import json
 from typing import Any
+
+
+def _serialize_context(value: Any) -> str:
+    """将上下文值序列化为适合放入提示词的文本。"""
+    if isinstance(value, str):
+        return value
+
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except TypeError:
+        return str(value)
 
 
 def build_consult_prompt(
@@ -34,6 +46,28 @@ def build_consult_prompt(
         context_desc.append(f"- 行号: {line_number}")
     if terminal_output := context.get("terminal_output"):
         context_desc.append(f"- 终端输出:\n```\n{terminal_output}\n```")
+    if answers_to_questions := context.get("answers_to_questions"):
+        context_desc.append(
+            "- 对补充问题的回答:\n"
+            f"```\n{_serialize_context(answers_to_questions)}\n```"
+        )
+
+    reserved_keys = {
+        "file_path",
+        "line_number",
+        "terminal_output",
+        "language",
+        "answers_to_questions",
+    }
+    extra_context = {
+        key: value for key, value in context.items()
+        if key not in reserved_keys
+    }
+    if extra_context:
+        context_desc.append(
+            "- 其他上下文:\n"
+            f"```json\n{_serialize_context(extra_context)}\n```"
+        )
 
     # 构建对话历史
     history_desc = ""

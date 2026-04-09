@@ -81,13 +81,15 @@ class AuraiConfig(BaseModel):
 
     # 最大迭代次数
     max_iterations: int = Field(
-        default=10,
+        default_factory=lambda: int(os.getenv("AURAI_MAX_ITERATIONS", "10")),
+        ge=1,
+        le=100,
         description="最大迭代次数"
     )
 
     # 温度参数
     temperature: float = Field(
-        default=0.7,
+        default_factory=lambda: float(os.getenv("AURAI_TEMPERATURE", "0.7")),
         ge=0.0,
         le=2.0,
         description="温度参数"
@@ -155,7 +157,10 @@ class ServerConfig(BaseModel):
     name: str = "Aurai Advisor"
 
     # 日志级别
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
+        default_factory=lambda: os.getenv("AURAI_LOG_LEVEL", "INFO").upper(),
+        description="日志级别"
+    )
 
     # 对话历史最大保存数
     max_history: int = Field(

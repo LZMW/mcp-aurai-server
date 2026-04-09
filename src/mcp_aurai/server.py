@@ -1,7 +1,9 @@
 """MCP服务器主文件 - 上级顾问"""
 
+import hashlib
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,56 +28,121 @@ logger = logging.getLogger(__name__)
 # 创建MCP服务器
 mcp = FastMCP(server_config.name)
 
-# 对话历史（用于迭代式问题解决）
-_conversation_history: list[dict[str, Any]] = []
+# 默认会话标识
+DEFAULT_SESSION_ID = "default"
+
+# 按会话隔离的对话历史
+_conversation_history: dict[str, list[dict[str, Any]]] = {}
+_loaded_sessions: set[str] = set()
 
 
-def _get_history() -> list[dict[str, Any]]:
-    """获取对话历史"""
-    return _conversation_history[-server_config.max_history:]
+def _normalize_session_id(session_id: str | None) -> str:
+    """规范化会话标识，确保旧调用默认落到 default 会话。"""
+    if session_id is None:
+        return DEFAULT_SESSION_ID
+
+    normalized = str(session_id).strip()
+    return normalized or DEFAULT_SESSION_ID
 
 
-def _clear_history(reason: str, log_prefix: str = "[历史]") -> int:
+def _get_history_file_for_session(session_id: str | None) -> Path:
     """
-    清空对话历史，并在启用持久化时立即同步到文件。
+    获取某个会话对应的历史文件路径。
+
+    默认会话继续使用原始 history_path，保证兼容旧版本；
+    其他会话写入同目录下的独立文件，避免不同线程互相污染。
+    """
+    normalized = _normalize_session_id(session_id)
+    history_file = Path(server_config.history_path)
+
+    if normalized == DEFAULT_SESSION_ID:
+        return history_file
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized).strip("._-") or "session"
+    safe_name = safe_name[:40]
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    return history_file.with_name(
+        f"{history_file.stem}.{safe_name}.{digest}{history_file.suffix}"
+    )
+
+
+def _ensure_session_loaded(session_id: str | None):
+    """按需加载某个会话的历史记录。"""
+    normalized = _normalize_session_id(session_id)
+    if normalized in _loaded_sessions:
+        return
+
+    if server_config.enable_persistence:
+        _conversation_history[normalized] = _load_history_from_file(normalized)
+    else:
+        _conversation_history[normalized] = []
+
+    _loaded_sessions.add(normalized)
+
+
+def _get_session_history(session_id: str | None) -> list[dict[str, Any]]:
+    """获取某个会话的完整历史。"""
+    normalized = _normalize_session_id(session_id)
+    _ensure_session_loaded(normalized)
+    return _conversation_history.setdefault(normalized, [])
+
+
+def _get_history(session_id: str | None = None) -> list[dict[str, Any]]:
+    """获取某个会话的对话历史。"""
+    history = _get_session_history(session_id)
+    return history[-server_config.max_history:]
+
+
+def _clear_history(
+    session_id: str | None,
+    reason: str,
+    log_prefix: str = "[历史]",
+) -> int:
+    """
+    清空某个会话的对话历史，并在启用持久化时立即同步到文件。
 
     这能避免只清空内存、不更新历史文件，导致服务重启后旧历史“复活”。
 
     Args:
+        session_id: 会话标识
         reason: 清空原因，写入日志便于排查
         log_prefix: 日志前缀
 
     Returns:
         清空前的历史条数
     """
-    history_count = len(_conversation_history)
-    _conversation_history.clear()
+    normalized = _normalize_session_id(session_id)
+    history = _get_session_history(normalized)
+    history_count = len(history)
+    history.clear()
 
     if server_config.enable_persistence:
-        _save_history_to_file()
+        _save_history_to_file(normalized)
 
-    logger.info(f"{log_prefix} 对话历史已清空（清除 {history_count} 条记录）")
+    logger.info(f"{log_prefix} 会话 {normalized!r} 的对话历史已清空（清除 {history_count} 条记录）")
     if reason:
         logger.info(f"   原因: {reason}")
 
     return history_count
 
 
-def _add_to_history(entry: dict[str, Any]):
-    """添加到对话历史"""
-    _conversation_history.append(entry)
+def _add_to_history(entry: dict[str, Any], session_id: str | None = None):
+    """添加到某个会话的对话历史。"""
+    normalized = _normalize_session_id(session_id)
+    history = _get_session_history(normalized)
+    history.append(entry)
     # 限制历史大小
-    if len(_conversation_history) > server_config.max_history:
-        _conversation_history.pop(0)
+    if len(history) > server_config.max_history:
+        history.pop(0)
 
     # 保存到文件(如果启用持久化)
     if server_config.enable_persistence:
-        _save_history_to_file()
+        _save_history_to_file(normalized)
 
 
-def _load_history_from_file() -> list[dict[str, Any]]:
+def _load_history_from_file(session_id: str | None = None) -> list[dict[str, Any]]:
     """
-    从文件加载对话历史
+    从文件加载某个会话的对话历史
 
     Returns:
         对话历史列表,如果加载失败返回空列表
@@ -83,7 +150,8 @@ def _load_history_from_file() -> list[dict[str, Any]]:
     if not server_config.enable_persistence:
         return []
 
-    history_file = Path(server_config.history_path)
+    normalized = _normalize_session_id(session_id)
+    history_file = _get_history_file_for_session(normalized)
 
     try:
         # 文件不存在时返回空列表
@@ -99,12 +167,26 @@ def _load_history_from_file() -> list[dict[str, Any]]:
         content = history_file.read_text(encoding="utf-8")
         history = json.loads(content)
 
-        # 验证类型
         if not isinstance(history, list):
-            logger.warning(f"历史文件格式错误,期望list,实际{type(history)}")
-            return []
+            # 兼容旧版本或其他格式：如果内容是字典，尽量提取对应会话。
+            if isinstance(history, dict):
+                if normalized == DEFAULT_SESSION_ID and isinstance(history.get(DEFAULT_SESSION_ID), list):
+                    history = history[DEFAULT_SESSION_ID]
+                elif isinstance(history.get(normalized), list):
+                    history = history[normalized]
+                elif (
+                    isinstance(history.get("sessions"), dict)
+                    and isinstance(history["sessions"].get(normalized), list)
+                ):
+                    history = history["sessions"][normalized]
+                else:
+                    logger.warning(f"历史文件格式错误,无法识别会话 {normalized!r} 的历史结构")
+                    return []
+            else:
+                logger.warning(f"历史文件格式错误,期望list,实际{type(history)}")
+                return []
 
-        logger.info(f"从文件加载了 {len(history)} 条历史记录")
+        logger.info(f"从文件加载了 {len(history)} 条历史记录，会话: {normalized!r}")
         return history
 
     except json.JSONDecodeError as e:
@@ -115,9 +197,9 @@ def _load_history_from_file() -> list[dict[str, Any]]:
         return []
 
 
-def _save_history_to_file():
+def _save_history_to_file(session_id: str | None = None):
     """
-    保存对话历史到文件
+    保存某个会话的对话历史到文件
 
     注意: 此函数应该在每次添加历史后调用
     如果保存失败,仅记录警告,不中断服务
@@ -125,7 +207,9 @@ def _save_history_to_file():
     if not server_config.enable_persistence:
         return
 
-    history_file = Path(server_config.history_path)
+    normalized = _normalize_session_id(session_id)
+    history_file = _get_history_file_for_session(normalized)
+    history = _conversation_history.get(normalized, [])
 
     try:
         # 确保目录存在
@@ -133,11 +217,11 @@ def _save_history_to_file():
 
         # 保存为格式化的JSON(可读性好)
         history_file.write_text(
-            json.dumps(_conversation_history, ensure_ascii=False, indent=2),
+            json.dumps(history, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
 
-        logger.debug(f"已保存 {len(_conversation_history)} 条历史记录到文件")
+        logger.debug(f"已保存会话 {normalized!r} 的 {len(history)} 条历史记录到文件")
 
     except Exception as e:
         logger.warning(f"保存历史文件失败: {e},继续使用内存模式")
@@ -159,6 +243,10 @@ async def consult_aurai(
     is_new_question: bool = Field(
         default=False,
         description="[重要] 是否为新问题（新问题会清空之前的所有对话历史，确保干净的上下文）"
+    ),
+    session_id: str | None = Field(
+        default=None,
+        description="会话标识。留空时使用默认会话；建议不同任务/线程使用不同 session_id 隔离上下文。"
     ),
 ) -> dict[str, Any]:
     """
@@ -297,8 +385,15 @@ async def consult_aurai(
     ```
     """
     config = get_aurai_config()
+    normalized_session_id = _normalize_session_id(session_id)
+    session_history = _get_session_history(normalized_session_id)
 
-    logger.info(f"收到consult_aurai请求，问题类型: {problem_type}，是否新问题: {is_new_question}")
+    logger.info(
+        "收到consult_aurai请求，问题类型: %s，是否新问题: %s，会话: %s",
+        problem_type,
+        is_new_question,
+        normalized_session_id,
+    )
 
     # [新问题] 处理新问题：两种方式触发清空历史
     # 方式1：明确标注 is_new_question=true
@@ -310,9 +405,9 @@ async def consult_aurai(
         # 明确标注新问题
         should_clear_history = True
         clear_reason = "下级AI明确标注为新问题"
-    elif _conversation_history:
+    elif session_history:
         # 自动检测：检查上一次对话是否已解决
-        last_entry = _conversation_history[-1]
+        last_entry = session_history[-1]
         last_response = last_entry.get("response", {})
 
         if last_response.get("resolved", False):
@@ -321,8 +416,9 @@ async def consult_aurai(
 
     # 执行清空操作
     if should_clear_history:
-        _clear_history(clear_reason, log_prefix="[新问题]")
+        _clear_history(normalized_session_id, clear_reason, log_prefix="[新问题]")
         logger.info(f"   新问题: {problem_type} - {error_message[:100]}...")
+        session_history = _get_session_history(normalized_session_id)
 
     # 解析 context 参数（支持 JSON 字符串或字典）
     parsed_context: dict[str, Any] = {}
@@ -348,15 +444,15 @@ async def consult_aurai(
         code_snippet=code_snippet,
         context=current_context,
         attempts_made=attempts_made,
-        iteration=len(_conversation_history),
-        conversation_history=_get_history(),
+        iteration=len(session_history),
+        conversation_history=_get_history(normalized_session_id),
     )
 
     # 调用上级AI，传递对话历史
     client = get_aurai_client()
     response = await client.chat(
         user_message=prompt,
-        conversation_history=_get_history()
+        conversation_history=_get_history(normalized_session_id)
     )
 
     # 记录到历史
@@ -366,7 +462,7 @@ async def consult_aurai(
         "error_message": error_message,
         "response": response,
         "had_answers": answers_to_questions is not None,
-    })
+    }, normalized_session_id)
 
     # 根据上级顾问的响应状态返回不同格式
     if response.get("status") == "aligning":
@@ -391,7 +487,7 @@ async def consult_aurai(
 
         # 检查问题是否已解决，若解决则清空对话历史
         if response.get("resolved", False):
-            _clear_history("上级顾问返回 resolved=true", log_prefix="[完成]")
+            _clear_history(normalized_session_id, "上级顾问返回 resolved=true", log_prefix="[完成]")
 
         return {
             "status": "success",
@@ -419,6 +515,10 @@ async def sync_context(
     project_info: Any = Field(
         default=None,
         description="项目信息字典，可包含项目名称、技术栈、任务描述等任意字段（支持 JSON 字符串或字典，会自动解析）"
+    ),
+    session_id: str | None = Field(
+        default=None,
+        description="会话标识。留空时使用默认会话；建议不同任务/线程使用不同 session_id 隔离上下文。"
     ),
 ) -> dict[str, Any]:
     """
@@ -527,7 +627,8 @@ async def sync_context(
     - `files`: 文件路径列表，**只能是 .txt 或 .md 文件**
     - `project_info`: 项目信息字典，可包含任意字段
     """
-    logger.info(f"收到sync_context请求，操作: {operation}")
+    normalized_session_id = _normalize_session_id(session_id)
+    logger.info(f"收到sync_context请求，操作: {operation}，会话: {normalized_session_id}")
 
     # 解析 files 参数（支持 JSON 字符串或列表）
     parsed_files: list[str] = []
@@ -557,7 +658,11 @@ async def sync_context(
 
     if operation == "clear":
         # 清空对话历史
-        _clear_history('sync_context(operation="clear")', log_prefix="[sync_context]")
+        _clear_history(
+            normalized_session_id,
+            'sync_context(operation="clear")',
+            log_prefix="[sync_context]",
+        )
         return {
             "status": "success",
             "message": "对话历史已清空",
@@ -614,7 +719,7 @@ async def sync_context(
             "file_contents": file_contents,  # 所有文件内容
             "project_info": optimized_project_info or {},
         }
-        _add_to_history(entry)
+        _add_to_history(entry, normalized_session_id)
 
         logger.info(f"上下文已同步，文件数: {len(all_files)}，读取文本文件: {len(file_contents)}，创建临时文件: {len(temp_files)}")
 
@@ -643,7 +748,7 @@ async def sync_context(
             "files_count": len(all_files),
             "text_files_read": len(file_contents),
             "temp_files_created": len(temp_files),
-            "history_count": len(_conversation_history),
+            "history_count": len(_get_session_history(normalized_session_id)),
         }
 
     else:
@@ -659,6 +764,10 @@ async def report_progress(
     result: str = Field(description="执行结果: success, failed, partial"),
     new_error: str | None = Field(default=None, description="新的错误信息"),
     feedback: str | None = Field(default=None, description="执行反馈"),
+    session_id: str | None = Field(
+        default=None,
+        description="会话标识。留空时使用默认会话；建议不同任务/线程使用不同 session_id 隔离上下文。"
+    ),
 ) -> dict[str, Any]:
     """
     报告执行进度，请求下一步指导
@@ -670,9 +779,11 @@ async def report_progress(
     **参数**：actions_taken（已执行的行动）、result（success/failed/partial）、new_error（新错误）、feedback（反馈）
     """
     config = get_aurai_config()
+    normalized_session_id = _normalize_session_id(session_id)
+    session_history = _get_session_history(normalized_session_id)
 
     # 检查迭代次数
-    iteration = len(_conversation_history)
+    iteration = len(session_history)
     if iteration >= config.max_iterations:
         logger.warning(f"达到最大迭代次数 ({config.max_iterations})，请求人工介入")
         return {
@@ -684,7 +795,7 @@ async def report_progress(
             "requires_human_intervention": True,
         }
 
-    logger.info(f"收到report_progress请求，结果: {result}")
+    logger.info(f"收到report_progress请求，结果: {result}，会话: {normalized_session_id}")
 
     # 构建提示词
     prompt = build_progress_prompt(
@@ -693,14 +804,14 @@ async def report_progress(
         result=result,
         new_error=new_error,
         feedback=feedback,
-        conversation_history=_get_history(),
+        conversation_history=_get_history(normalized_session_id),
     )
 
     # 调用上级AI，传递对话历史
     client = get_aurai_client()
     response = await client.chat(
         user_message=prompt,
-        conversation_history=_get_history()
+        conversation_history=_get_history(normalized_session_id)
     )
 
     # 记录到历史
@@ -711,18 +822,23 @@ async def report_progress(
         "new_error": new_error,
         "feedback": feedback,
         "response": response,
-    })
+    }, normalized_session_id)
 
     # 检查问题是否已解决，若解决则清空对话历史
     if response.get("resolved", False):
-        _clear_history("report_progress 返回 resolved=true", log_prefix="[完成]")
+        _clear_history(normalized_session_id, "report_progress 返回 resolved=true", log_prefix="[完成]")
 
     logger.info(f"report_progress完成，resolved: {response.get('resolved', False)}")
     return response
 
 
 @mcp.tool()
-async def get_status() -> dict[str, Any]:
+async def get_status(
+    session_id: str | None = Field(
+        default=None,
+        description="会话标识。留空时使用默认会话。"
+    ),
+) -> dict[str, Any]:
     """
     获取当前状态
 
@@ -731,8 +847,12 @@ async def get_status() -> dict[str, Any]:
     ---
     **返回内容**：conversation_history_count（对话历史数量）、max_iterations（最大迭代次数）、max_history（最大历史条数）、provider（AI提供商）、model（模型名称）
     """
+    normalized_session_id = _normalize_session_id(session_id)
     return {
-        "conversation_history_count": len(_conversation_history),
+        "session_id": normalized_session_id,
+        "conversation_history_count": len(_get_session_history(normalized_session_id)),
+        "loaded_session_count": len(_loaded_sessions),
+        "history_path": str(_get_history_file_for_session(normalized_session_id)),
         "max_iterations": get_aurai_config().max_iterations,
         "max_history": server_config.max_history,
         "provider": get_aurai_config().provider,
@@ -742,16 +862,18 @@ async def get_status() -> dict[str, Any]:
 
 def main():
     """主入口函数"""
-    global _conversation_history
+    global _conversation_history, _loaded_sessions
 
     logger.info(f"启动 {server_config.name} MCP服务器")
     logger.info(f"AI提供商: {get_aurai_config().provider}")
     logger.info(f"模型: {get_aurai_config().model}")
 
     # 初始化对话历史持久化
+    _conversation_history = {}
+    _loaded_sessions = set()
     if server_config.enable_persistence:
-        _conversation_history = _load_history_from_file()
-        logger.info(f"持久化已启用,历史文件: {server_config.history_path}")
+        _ensure_session_loaded(DEFAULT_SESSION_ID)
+        logger.info(f"持久化已启用,默认历史文件: {server_config.history_path}")
     else:
         logger.info("持久化未启用,使用内存模式")
 
