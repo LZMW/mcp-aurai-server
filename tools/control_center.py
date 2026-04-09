@@ -9,6 +9,7 @@ Aurai 配置生成工具 - 简化版
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -65,6 +66,9 @@ class AuraiConfigTool:
         # 配置文件路径
         self.env_path = PROJECT_ROOT / ".env"
         self.history_path = Path.home() / ".mcp-aurai" / "history.json"
+        self.audit_entries = []
+        self.filtered_audit_entries = []
+        self.audit_sessions = ["全部会话"]
 
         # 创建界面
         self.create_widgets()
@@ -137,6 +141,8 @@ class AuraiConfigTool:
             ("AURAI_MAX_ITERATIONS", "最大迭代次数 (5-20)", "entry", None),
             ("AURAI_MAX_HISTORY", "对话历史最大保存数 (10-100)", "entry", None),
             ("AURAI_TEMPERATURE", "温度参数 (0.0-2.0)", "entry", None),
+            ("AURAI_HISTORY_PATH", "历史文件路径（可选，自定义默认会话历史位置）", "entry", None),
+            ("AURAI_LOG_LEVEL", "日志级别（DEBUG/INFO/WARNING/ERROR）", "entry", None),
             ("AURAI_HISTORY_LOCK_TIMEOUT", "历史文件锁超时（秒，默认 10）", "entry", None),
             ("AURAI_ENABLE_HISTORY_SUMMARY", "启用历史摘要（true/false）", "entry", None),
             ("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "摘要后保留最近原始轮次（默认 3）", "entry", None),
@@ -235,6 +241,32 @@ class AuraiConfigTool:
 
         Label(left_frame, text="对话历史记录", font=("Microsoft YaHei", 11, "bold")).pack(pady=5)
 
+        filter_frame = Frame(left_frame)
+        filter_frame.pack(fill="x", padx=5, pady=(0, 5))
+
+        Label(filter_frame, text="会话筛选:", font=("Microsoft YaHei", 9)).pack(side="left")
+        self.audit_session_var = StringVar(value="全部会话")
+        self.audit_session_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.audit_session_var,
+            state="readonly",
+            values=self.audit_sessions,
+            font=("Microsoft YaHei", 9),
+            width=22,
+        )
+        self.audit_session_combo.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        self.audit_session_combo.bind("<<ComboboxSelected>>", self.on_audit_session_changed)
+
+        self.audit_summary_label = Label(
+            left_frame,
+            text="",
+            font=("Microsoft YaHei", 9),
+            fg="#666666",
+            anchor="w",
+            justify="left",
+        )
+        self.audit_summary_label.pack(fill="x", padx=5, pady=(0, 5))
+
         self.history_listbox = Listbox(left_frame, font=("Consolas", 10))
         self.history_listbox.pack(fill="both", expand=True, padx=5, pady=5)
         self.history_listbox.bind("<<ListboxSelect>>", self.on_history_select)
@@ -252,43 +284,180 @@ class AuraiConfigTool:
         )
         self.detail_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-    def load_history(self):
-        """加载历史对话"""
+    def _update_history_path_from_config(self):
+        """根据当前配置更新历史文件路径。"""
+        default_history_path = Path.home() / ".mcp-aurai" / "history.json"
+        configured = self.config_vars.get("AURAI_HISTORY_PATH")
+
+        if configured:
+            value = configured.get().strip()
+            if value:
+                self.history_path = Path(value).expanduser()
+                return
+
+        self.history_path = default_history_path
+
+    def _infer_session_name_from_history_file(self, history_file: Path) -> str:
+        """根据历史文件名推断会话名称。"""
+        if history_file.name == self.history_path.name:
+            return "default"
+
+        pattern = re.compile(
+            rf"^{re.escape(self.history_path.stem)}\.(.+)\.[0-9a-f]{{8}}{re.escape(self.history_path.suffix)}$"
+        )
+        match = pattern.match(history_file.name)
+        if match:
+            return match.group(1)
+
+        return history_file.stem
+
+    def _get_all_history_files(self):
+        """获取默认会话和派生会话的历史文件列表。"""
+        history_files = []
+
+        if self.history_path.exists():
+            history_files.append(self.history_path)
+
+        if self.history_path.parent.exists():
+            pattern = f"{self.history_path.stem}.*{self.history_path.suffix}"
+            for candidate in sorted(self.history_path.parent.glob(pattern)):
+                if candidate == self.history_path:
+                    continue
+                if candidate.name.endswith(".lock") or candidate.suffix == ".tmp":
+                    continue
+                history_files.append(candidate)
+
+        return history_files
+
+    def _build_history_display_text(self, audit_entry: dict) -> str:
+        """构建历史记录列表显示文本。"""
+        session_name = audit_entry["session"]
+        entry = audit_entry["entry"]
+        entry_type = entry.get("type", "unknown")
+
+        if entry_type == "consult":
+            problem_type = entry.get("problem_type", "unknown")
+            error_msg = entry.get("error_message", "")[:40]
+            return f"[{session_name}] 咨询: {problem_type} - {error_msg}"
+
+        if entry_type == "sync_context":
+            operation = entry.get("operation", "unknown")
+            uploaded_count = len(entry.get("uploaded_files", []))
+            file_count = len(entry.get("files", []))
+            return f"[{session_name}] 同步: {operation} - 文件 {uploaded_count or file_count} 个"
+
+        if entry_type == "progress":
+            result = entry.get("result", "unknown")
+            actions = entry.get("actions_taken", "")[:30]
+            return f"[{session_name}] 进度: {result} - {actions}"
+
+        if entry_type == "summary":
+            covered = entry.get("covered_entry_count", 0)
+            return f"[{session_name}] 历史摘要: 覆盖 {covered} 条旧记录"
+
+        return f"[{session_name}] {entry_type}"
+
+    def _apply_audit_filter(self):
+        """根据当前会话筛选刷新历史列表。"""
+        selected_session = self.audit_session_var.get() or "全部会话"
+        if selected_session == "全部会话":
+            self.filtered_audit_entries = list(self.audit_entries)
+        else:
+            self.filtered_audit_entries = [
+                item for item in self.audit_entries
+                if item["session"] == selected_session
+            ]
+
         self.history_listbox.delete(0, END)
+        self.detail_text.delete(1.0, END)
+
+        if not self.filtered_audit_entries:
+            self.history_listbox.insert(END, "暂无匹配的历史记录")
+        else:
+            for item in self.filtered_audit_entries:
+                self.history_listbox.insert(END, self._build_history_display_text(item))
+
+        self.audit_summary_label.config(
+            text=(
+                f"历史基准路径: {self.history_path}\n"
+                f"已发现 {max(len(self.audit_sessions) - 1, 0)} 个会话，"
+                f"当前列表 {len(self.filtered_audit_entries)} 条记录"
+            )
+        )
+
+    def on_audit_session_changed(self, event):
+        """切换会话筛选。"""
+        self._apply_audit_filter()
+
+    def load_history(self):
+        """加载历史对话（支持多个会话文件）。"""
+        self._update_history_path_from_config()
+        self.audit_entries = []
 
         try:
-            if not self.history_path.exists():
+            history_files = self._get_all_history_files()
+            if not history_files:
+                self.audit_sessions = ["全部会话"]
+                self.audit_session_combo["values"] = self.audit_sessions
+                self.audit_session_var.set("全部会话")
+                self._apply_audit_filter()
+                self.history_listbox.delete(0, END)
                 self.history_listbox.insert(END, "未找到历史文件")
                 return
 
-            with open(self.history_path, "r", encoding="utf-8") as f:
-                history = json.load(f)
+            sessions = []
+            for history_file in history_files:
+                session_name = self._infer_session_name_from_history_file(history_file)
+                if session_name not in sessions:
+                    sessions.append(session_name)
 
-            if not history:
-                self.history_listbox.insert(END, "暂无对话记录")
-                return
+                try:
+                    with open(history_file, "r", encoding="utf-8") as f:
+                        history = json.load(f)
+                except Exception as e:
+                    self.audit_entries.append({
+                        "session": session_name,
+                        "history_file": str(history_file),
+                        "history_index": -1,
+                        "entry": {
+                            "type": "load_error",
+                            "message": f"读取失败: {e}",
+                        },
+                    })
+                    continue
 
-            for idx, entry in enumerate(history):
-                entry_type = entry.get("type", "unknown")
-                timestamp = entry.get("timestamp", "N/A")
+                if not isinstance(history, list):
+                    self.audit_entries.append({
+                        "session": session_name,
+                        "history_file": str(history_file),
+                        "history_index": -1,
+                        "entry": {
+                            "type": "format_error",
+                            "message": "历史文件格式不是列表",
+                        },
+                    })
+                    continue
 
-                if entry_type == "consult":
-                    problem_type = entry.get("problem_type", "unknown")
-                    error_msg = entry.get("error_message", "")[:50]
-                    display_text = f"#{idx + 1} [{timestamp}] 咨询: {problem_type} - {error_msg}..."
-                elif entry_type == "sync_context":
-                    operation = entry.get("operation", "unknown")
-                    display_text = f"#{idx + 1} [{timestamp}] 同步: {operation}"
-                elif entry_type == "progress":
-                    result = entry.get("result", "unknown")
-                    display_text = f"#{idx + 1} [{timestamp}] 进度: {result}"
-                else:
-                    display_text = f"#{idx + 1} [{timestamp}] {entry_type}"
+                for idx, entry in enumerate(history):
+                    self.audit_entries.append({
+                        "session": session_name,
+                        "history_file": str(history_file),
+                        "history_index": idx,
+                        "entry": entry,
+                    })
 
-                self.history_listbox.insert(END, display_text)
+            self.audit_sessions = ["全部会话"] + sessions
+            self.audit_session_combo["values"] = self.audit_sessions
+            if self.audit_session_var.get() not in self.audit_sessions:
+                self.audit_session_var.set("全部会话")
+
+            self._apply_audit_filter()
 
         except Exception as e:
+            self.history_listbox.delete(0, END)
             self.history_listbox.insert(END, f"加载历史失败: {e}")
+            self.detail_text.delete(1.0, END)
+            self.detail_text.insert(1.0, f"加载历史失败: {e}")
 
     def on_history_select(self, event):
         """历史记录选择事件"""
@@ -298,12 +467,14 @@ class AuraiConfigTool:
 
         idx = selection[0]
         try:
-            with open(self.history_path, "r", encoding="utf-8") as f:
-                history = json.load(f)
-
-            if idx < len(history):
-                entry = history[idx]
-                formatted = json.dumps(entry, ensure_ascii=False, indent=2)
+            if idx < len(self.filtered_audit_entries):
+                item = self.filtered_audit_entries[idx]
+                formatted = json.dumps({
+                    "session": item["session"],
+                    "history_file": item["history_file"],
+                    "history_index": item["history_index"],
+                    "entry": item["entry"],
+                }, ensure_ascii=False, indent=2)
                 self.detail_text.delete(1.0, END)
                 self.detail_text.insert(1.0, formatted)
 
@@ -330,6 +501,7 @@ class AuraiConfigTool:
                         if key in self.config_vars:
                             self.config_vars[key].set(value)
 
+            self._update_history_path_from_config()
             self.show_status("配置加载成功！", "green")
 
         except Exception as e:
@@ -472,6 +644,8 @@ class AuraiConfigTool:
                 f.write("# AURAI_MAX_ITERATIONS      - 最大对话轮数（默认 10）\n")
                 f.write("# AURAI_MAX_HISTORY          - 对话历史最大保存数（默认 50）\n")
                 f.write("# AURAI_TEMPERATURE         - 温度参数 0.0-2.0（默认 0.7）\n")
+                f.write("# AURAI_HISTORY_PATH        - 默认会话历史文件路径（可选）\n")
+                f.write("# AURAI_LOG_LEVEL           - 日志级别（默认 INFO）\n")
                 f.write("# AURAI_HISTORY_LOCK_TIMEOUT - 历史文件锁等待时间（秒，默认 10）\n")
                 f.write("# AURAI_ENABLE_HISTORY_SUMMARY - 是否启用历史摘要（默认 true）\n")
                 f.write("# AURAI_HISTORY_SUMMARY_KEEP_RECENT - 摘要后保留最近原始轮次（默认 3）\n")
@@ -479,8 +653,6 @@ class AuraiConfigTool:
                 f.write("#\n")
                 f.write("# 【以下配置自动管理，无需手动设置】\n")
                 f.write("# AURAI_ENABLE_PERSISTENCE   - 对话历史持久化（自动启用）\n")
-                f.write("# AURAI_HISTORY_PATH        - 历史文件路径（自动保存到用户目录）\n")
-                f.write("# AURAI_LOG_LEVEL           - 日志级别（默认 INFO）\n")
                 f.write("#\n")
                 f.write("################################################################################\n")
                 f.write("# 配置内容\n")
@@ -603,6 +775,9 @@ class AuraiConfigTool:
             with open(self.env_path, "w", encoding="utf-8") as f:
                 for key, value in config_values.items():
                     f.write(f"{key}={value}\n")
+
+            self._update_history_path_from_config()
+            self.load_history()
 
             # 显示保存位置
             file_path_obj = Path(file_path)
