@@ -18,6 +18,9 @@ def test_env_variables_are_applied_to_config(monkeypatch):
     monkeypatch.setenv("AURAI_MAX_ITERATIONS", "7")
     monkeypatch.setenv("AURAI_LOG_LEVEL", "debug")
     monkeypatch.setenv("AURAI_HISTORY_LOCK_TIMEOUT", "3.5")
+    monkeypatch.setenv("AURAI_ENABLE_HISTORY_SUMMARY", "false")
+    monkeypatch.setenv("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "4")
+    monkeypatch.setenv("AURAI_HISTORY_SUMMARY_TRIGGER", "9")
     monkeypatch.setenv("AURAI_API_KEY", "test-api-key-12345")
     monkeypatch.setenv("AURAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setenv("AURAI_MODEL", "test-model")
@@ -34,6 +37,9 @@ def test_env_variables_are_applied_to_config(monkeypatch):
     assert aurai_config.max_iterations == 7
     assert server_config.log_level == "DEBUG"
     assert server_config.history_lock_timeout == 3.5
+    assert server_config.enable_history_summary is False
+    assert server_config.history_summary_keep_recent == 4
+    assert server_config.history_summary_trigger_entries == 9
 
 
 def test_build_consult_prompt_includes_answers_and_extra_context():
@@ -76,6 +82,24 @@ def test_sync_context_history_messages_include_project_info():
     assert len(messages) == 1
     assert "已同步项目背景" in messages[0]["content"]
     assert "示例项目" in messages[0]["content"]
+
+
+def test_summary_history_messages_are_included():
+    from mcp_aurai.llm import AuraiClient
+
+    client = AuraiClient.__new__(AuraiClient)
+    client.config = SimpleNamespace(max_message_tokens=5000)
+
+    messages = client._build_messages_from_history([
+        {
+            "type": "summary",
+            "summary_text": "这里是旧历史纪要",
+        }
+    ])
+
+    assert len(messages) == 1
+    assert "历史摘要" in messages[0]["content"]
+    assert "旧历史纪要" in messages[0]["content"]
 
 
 def test_context_window_prefers_latest_sync_context():

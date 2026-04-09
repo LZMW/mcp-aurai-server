@@ -145,7 +145,15 @@ class AuraiClient:
         for turn in conversation_history:
             group_messages: list[dict[str, str]] = []
 
-            if turn.get("type") == "sync_context":
+            if turn.get("type") == "summary":
+                summary_text = turn.get("summary_text")
+                if summary_text:
+                    group_messages.append({
+                        "role": "system",
+                        "content": "## 历史摘要\n" + summary_text,
+                    })
+
+            elif turn.get("type") == "sync_context":
                 project_info = turn.get("project_info", {})
                 if project_info:
                     project_info_text = self._serialize_for_message(project_info)

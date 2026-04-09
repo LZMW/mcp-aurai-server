@@ -42,6 +42,12 @@ _loaded_sessions: set[str] = set()
 # 历史文件锁的轮询间隔（秒）
 HISTORY_LOCK_RETRY_INTERVAL = 0.05
 
+# 历史摘要条目的类型
+SUMMARY_ENTRY_TYPE = "summary"
+
+# 单条摘要信息的最大显示长度
+SUMMARY_FIELD_LIMIT = 160
+
 
 def _normalize_session_id(session_id: str | None) -> str:
     """规范化会话标识，确保旧调用默认落到 default 会话。"""
@@ -156,6 +162,171 @@ def _write_history_file_atomic(history_file: Path, history: list[dict[str, Any]]
                 logger.warning("清理历史临时文件失败: %s", temp_path, exc_info=True)
 
 
+def _truncate_summary_text(value: Any, limit: int = SUMMARY_FIELD_LIMIT) -> str:
+    """将任意值裁剪为适合放进历史摘要的短文本。"""
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(value)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 1)] + "…"
+
+
+def _summarize_history_entry(entry: dict[str, Any]) -> str:
+    """将单条历史记录压缩成一句纪要。"""
+    entry_type = entry.get("type", "unknown")
+
+    if entry_type == SUMMARY_ENTRY_TYPE:
+        covered = entry.get("covered_entry_count")
+        prefix = f"更早摘要（覆盖 {covered} 条）" if covered else "更早摘要"
+        return f"{prefix}: {_truncate_summary_text(entry.get('summary_text'), 240)}"
+
+    if entry_type == "consult":
+        response = entry.get("response", {})
+        parts = [
+            f"咨询：类型={entry.get('problem_type', 'unknown')}",
+            f"错误={_truncate_summary_text(entry.get('error_message'))}",
+        ]
+        if entry.get("had_answers"):
+            parts.append("已补充回答")
+        if response.get("analysis"):
+            parts.append(f"分析={_truncate_summary_text(response.get('analysis'))}")
+        elif response.get("guidance"):
+            parts.append(f"建议={_truncate_summary_text(response.get('guidance'))}")
+        parts.append(f"resolved={'是' if response.get('resolved') else '否'}")
+        return "；".join(parts)
+
+    if entry_type == "progress":
+        response = entry.get("response", {})
+        parts = [
+            f"进展：操作={_truncate_summary_text(entry.get('actions_taken'))}",
+            f"结果={entry.get('result', 'unknown')}",
+        ]
+        if entry.get("new_error"):
+            parts.append(f"新错误={_truncate_summary_text(entry.get('new_error'))}")
+        if entry.get("feedback"):
+            parts.append(f"反馈={_truncate_summary_text(entry.get('feedback'))}")
+        if response.get("guidance"):
+            parts.append(f"顾问建议={_truncate_summary_text(response.get('guidance'))}")
+        parts.append(f"resolved={'是' if response.get('resolved') else '否'}")
+        return "；".join(parts)
+
+    if entry_type == "sync_context":
+        files = entry.get("files", [])
+        file_names = [Path(file).name for file in files[:3]]
+        file_desc = ", ".join(file_names)
+        if len(files) > 3:
+            file_desc += f" 等{len(files)}个"
+
+        project_info = entry.get("project_info", {})
+        project_keys = ", ".join(list(project_info.keys())[:5]) if isinstance(project_info, dict) else ""
+
+        parts = [f"上下文同步：operation={entry.get('operation', 'unknown')}"]
+        if file_desc:
+            parts.append(f"文件={file_desc}")
+        if entry.get("temp_files"):
+            parts.append(f"大内容缓存={len(entry.get('temp_files', []))}")
+        if project_keys:
+            parts.append(f"项目字段={project_keys}")
+        return "；".join(parts)
+
+    return f"{entry_type}：{_truncate_summary_text(entry)}"
+
+
+def _build_history_summary_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """将多条较早历史压成一条摘要记录。"""
+    if not entries:
+        return None
+
+    type_counts: dict[str, int] = {}
+    summary_lines: list[str] = []
+
+    for entry in entries:
+        entry_type = entry.get("type", "unknown")
+        type_counts[entry_type] = type_counts.get(entry_type, 0) + 1
+        summary_lines.append(f"- {_summarize_history_entry(entry)}")
+
+    type_desc = "，".join(f"{entry_type}:{count}" for entry_type, count in type_counts.items())
+    summary_text = (
+        f"已压缩较早的 {len(entries)} 条历史记录。"
+        f"{f' 来源类型：{type_desc}。' if type_desc else ''}\n"
+        + "\n".join(summary_lines)
+    )
+
+    return {
+        "type": SUMMARY_ENTRY_TYPE,
+        "summary_text": summary_text,
+        "covered_entry_count": len(entries),
+        "covered_type_counts": type_counts,
+    }
+
+
+def _maybe_compact_history(session_id: str | None):
+    """在历史记录变长时，自动把较早轮次压缩成摘要。"""
+    if not server_config.enable_history_summary:
+        return
+
+    normalized = _normalize_session_id(session_id)
+    history = _get_session_history(normalized)
+    raw_indexes = [
+        index for index, entry in enumerate(history)
+        if entry.get("type") != SUMMARY_ENTRY_TYPE
+    ]
+
+    summary_slot_count = 1
+    available_raw_slots = max(server_config.max_history - summary_slot_count, 0)
+    keep_recent = min(server_config.history_summary_keep_recent, available_raw_slots)
+    trigger_threshold = max(server_config.history_summary_trigger_entries, keep_recent + 1)
+
+    if len(raw_indexes) <= trigger_threshold:
+        return
+
+    keep_indexes = set(raw_indexes[-keep_recent:]) if keep_recent else set()
+
+    latest_sync_index = None
+    for index in range(len(history) - 1, -1, -1):
+        if history[index].get("type") == "sync_context":
+            latest_sync_index = index
+            break
+
+    if latest_sync_index is not None and available_raw_slots > 0 and latest_sync_index not in keep_indexes:
+        if len(keep_indexes) >= available_raw_slots:
+            keep_indexes.remove(min(keep_indexes))
+        keep_indexes.add(latest_sync_index)
+
+    summary_source_indexes = [
+        index for index in range(len(history))
+        if index not in keep_indexes
+    ]
+    entries_to_summarize = [history[index] for index in summary_source_indexes]
+    summary_entry = _build_history_summary_entry(entries_to_summarize)
+
+    if not summary_entry:
+        return
+
+    new_history = [summary_entry]
+    for index, entry in enumerate(history):
+        if index in keep_indexes:
+            new_history.append(entry)
+
+    history[:] = new_history
+    logger.info(
+        "会话 %r 的较早历史已摘要化：压缩 %s 条，保留 %s 条原始记录",
+        normalized,
+        len(entries_to_summarize),
+        len(new_history) - 1,
+    )
+
+
 def _ensure_session_loaded(session_id: str | None):
     """按需加载某个会话的历史记录。"""
     normalized = _normalize_session_id(session_id)
@@ -221,9 +392,15 @@ def _add_to_history(entry: dict[str, Any], session_id: str | None = None):
     normalized = _normalize_session_id(session_id)
     history = _get_session_history(normalized)
     history.append(entry)
-    # 限制历史大小
-    if len(history) > server_config.max_history:
-        history.pop(0)
+
+    _maybe_compact_history(normalized)
+
+    # 最终兜底，避免极端配置下历史条数仍超限
+    while len(history) > server_config.max_history:
+        if history and history[0].get("type") == SUMMARY_ENTRY_TYPE and len(history) > 1:
+            history.pop(1)
+        else:
+            history.pop(0)
 
     # 保存到文件(如果启用持久化)
     if server_config.enable_persistence:

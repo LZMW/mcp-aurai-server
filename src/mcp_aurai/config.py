@@ -193,6 +193,28 @@ class ServerConfig(BaseModel):
         description="历史文件锁超时时间（秒）"
     )
 
+    # 是否启用历史摘要化
+    enable_history_summary: bool = Field(
+        default_factory=lambda: os.getenv("AURAI_ENABLE_HISTORY_SUMMARY", "true").lower() == "true",
+        description="是否启用历史摘要化"
+    )
+
+    # 历史摘要后保留的最近原始轮次数
+    history_summary_keep_recent: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "3")),
+        ge=1,
+        le=20,
+        description="历史摘要后保留的最近原始轮次数"
+    )
+
+    # 触发历史摘要的原始记录数阈值
+    history_summary_trigger_entries: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_HISTORY_SUMMARY_TRIGGER", "8")),
+        ge=2,
+        le=100,
+        description="触发历史摘要的原始记录数阈值"
+    )
+
 
 # 全局配置实例
 _config: AuraiConfig | None = None

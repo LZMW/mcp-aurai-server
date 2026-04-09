@@ -45,6 +45,9 @@ def configure_persistence(server, tmp_path: Path) -> Path:
     server.server_config.enable_persistence = True
     server.server_config.history_path = str(history_path)
     server.server_config.history_lock_timeout = 10.0
+    server.server_config.enable_history_summary = True
+    server.server_config.history_summary_keep_recent = 3
+    server.server_config.history_summary_trigger_entries = 8
     reset_server_state(server)
     server._ensure_session_loaded(server.DEFAULT_SESSION_ID)
     server._save_history_to_file()
@@ -294,3 +297,72 @@ def test_save_history_uses_atomic_replace_and_cleans_temp_files(server_module, t
     assert target_path == history_path
     assert temp_path.suffix == ".tmp"
     assert not temp_path.exists()
+
+
+def test_history_summary_compacts_older_entries(server_module, tmp_path):
+    server = server_module
+    configure_persistence(server, tmp_path)
+    server.server_config.history_summary_keep_recent = 2
+    server.server_config.history_summary_trigger_entries = 5
+
+    for index in range(6):
+        server._add_to_history({
+            "type": "consult",
+            "problem_type": "runtime_error",
+            "error_message": f"问题{index}",
+            "response": {
+                "resolved": False,
+                "analysis": f"分析{index}",
+            },
+        })
+
+    history = server._get_session_history(None)
+
+    assert history[0]["type"] == server.SUMMARY_ENTRY_TYPE
+    assert "问题0" in history[0]["summary_text"]
+    assert "问题3" in history[0]["summary_text"]
+    assert [entry["error_message"] for entry in history[1:]] == ["问题4", "问题5"]
+
+
+def test_history_summary_keeps_latest_sync_context(server_module, tmp_path):
+    server = server_module
+    configure_persistence(server, tmp_path)
+    server.server_config.history_summary_keep_recent = 2
+    server.server_config.history_summary_trigger_entries = 4
+
+    server._add_to_history({
+        "type": "consult",
+        "problem_type": "runtime_error",
+        "error_message": "旧问题",
+        "response": {"resolved": False},
+    })
+    server._add_to_history({
+        "type": "sync_context",
+        "operation": "incremental",
+        "files": ["docs/old.md"],
+        "temp_files": [],
+        "file_contents": {"docs/old.md": "重要上下文"},
+        "project_info": {},
+    })
+    server._add_to_history({
+        "type": "progress",
+        "actions_taken": "尝试一",
+        "result": "partial",
+        "response": {"resolved": False},
+    })
+    server._add_to_history({
+        "type": "consult",
+        "problem_type": "runtime_error",
+        "error_message": "较新问题",
+        "response": {"resolved": False},
+    })
+    server._add_to_history({
+        "type": "progress",
+        "actions_taken": "尝试二",
+        "result": "failed",
+        "response": {"resolved": False},
+    })
+
+    history = server._get_session_history(None)
+    assert history[0]["type"] == server.SUMMARY_ENTRY_TYPE
+    assert any(entry.get("type") == "sync_context" for entry in history[1:])
