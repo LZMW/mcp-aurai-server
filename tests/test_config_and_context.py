@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -72,3 +74,80 @@ def test_sync_context_history_messages_include_project_info():
     assert len(messages) == 1
     assert "已同步项目背景" in messages[0]["content"]
     assert "示例项目" in messages[0]["content"]
+
+
+def test_context_window_prefers_latest_sync_context():
+    from mcp_aurai.llm import AuraiClient
+
+    client = AuraiClient.__new__(AuraiClient)
+    client.config = SimpleNamespace(
+        max_message_tokens=5000,
+        max_tokens=40,
+        context_window=80,
+    )
+
+    sync_message = {"role": "system", "content": "S" * 40}
+    consult_messages = [
+        {"role": "user", "content": "U" * 40},
+        {"role": "assistant", "content": "A" * 40},
+    ]
+
+    budget = client._estimate_messages_tokens(sync_message if isinstance(sync_message, list) else [sync_message]) + 1
+    selected, trimmed = client._select_history_messages_within_budget(
+        [
+            {"type": "sync_context", "messages": [sync_message]},
+            {"type": "consult", "messages": consult_messages},
+        ],
+        budget=budget,
+    )
+
+    assert trimmed is True
+    assert selected == [sync_message]
+
+
+@pytest.mark.asyncio
+async def test_chat_caps_output_tokens_by_context_window():
+    from mcp_aurai.llm import AuraiClient
+
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"status":"ok"}')
+                    )
+                ]
+            )
+
+    client = AuraiClient.__new__(AuraiClient)
+    client.config = SimpleNamespace(
+        api_key="test-api-key-12345",
+        base_url="https://example.com/v1",
+        model="test-model",
+        temperature=0.3,
+        max_message_tokens=5000,
+        max_tokens=40,
+        context_window=60,
+    )
+    client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions())
+    )
+
+    response = await client.chat(
+        user_message="U" * 80,
+        system_prompt="S" * 80,
+        conversation_history=None,
+    )
+
+    prompt_tokens = client._estimate_messages_tokens(captured["messages"])
+    expected_max_tokens = min(
+        client.config.max_tokens,
+        max(client.config.context_window - prompt_tokens, 1),
+    )
+
+    assert response["status"] == "ok"
+    assert captured["temperature"] == 0.3
+    assert captured["max_tokens"] == expected_max_tokens
