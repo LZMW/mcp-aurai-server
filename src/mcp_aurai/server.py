@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,9 @@ DEFAULT_SESSION_ID = "default"
 # 按会话隔离的对话历史
 _conversation_history: dict[str, list[dict[str, Any]]] = {}
 _loaded_sessions: set[str] = set()
+_activity_lock = threading.Lock()
+_last_activity_at = time.monotonic()
+_stdio_watchdog_started = False
 
 # 历史文件锁的轮询间隔（秒）
 HISTORY_LOCK_RETRY_INTERVAL = 0.05
@@ -47,6 +51,76 @@ SUMMARY_ENTRY_TYPE = "summary"
 
 # 单条摘要信息的最大显示长度
 SUMMARY_FIELD_LIMIT = 160
+
+
+def _mark_process_activity(reason: str = ""):
+    """记录当前进程最近一次处理请求的时间。"""
+    global _last_activity_at
+    with _activity_lock:
+        _last_activity_at = time.monotonic()
+
+    if reason:
+        logger.debug("已刷新进程活动时间: %s", reason)
+
+
+def _get_process_idle_seconds(now: float | None = None) -> float:
+    """获取当前进程空闲了多久。"""
+    current_time = now if now is not None else time.monotonic()
+    with _activity_lock:
+        last_activity_at = _last_activity_at
+    return max(current_time - last_activity_at, 0.0)
+
+
+def _should_exit_for_stdio_idle(now: float | None = None) -> bool:
+    """
+    判断 stdio 服务是否应因空闲而退出。
+
+    只要超过配置的空闲阈值，就允许当前实例自行结束，
+    让真正还在使用它的客户端按需重新拉起新实例。
+    """
+    timeout = server_config.stdio_idle_timeout_seconds
+    if timeout <= 0:
+        return False
+
+    return _get_process_idle_seconds(now) >= timeout
+
+
+def _start_stdio_idle_watchdog():
+    """启动 stdio 空闲退出 watchdog，避免残留实例长期堆积。"""
+    global _stdio_watchdog_started
+
+    if _stdio_watchdog_started:
+        return
+
+    if server_config.stdio_idle_timeout_seconds <= 0:
+        logger.info("stdio 空闲自动退出已禁用")
+        return
+
+    _stdio_watchdog_started = True
+
+    def watchdog():
+        logger.info(
+            "stdio 空闲 watchdog 已启动，超时: %s 秒，检查间隔: %s 秒",
+            server_config.stdio_idle_timeout_seconds,
+            server_config.stdio_idle_check_interval_seconds,
+        )
+        while True:
+            time.sleep(server_config.stdio_idle_check_interval_seconds)
+            idle_seconds = _get_process_idle_seconds()
+            if _should_exit_for_stdio_idle():
+                logger.warning(
+                    "stdio 服务已空闲 %.1f 秒，达到退出阈值 %s 秒，进程将自动结束",
+                    idle_seconds,
+                    server_config.stdio_idle_timeout_seconds,
+                )
+                os._exit(0)
+
+    thread = threading.Thread(
+        target=watchdog,
+        name="aurai-stdio-idle-watchdog",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _normalize_session_id(session_id: str | None) -> str:
@@ -645,6 +719,7 @@ async def consult_aurai(
     )
     ```
     """
+    _mark_process_activity("consult_aurai")
     config = get_aurai_config()
     normalized_session_id = _normalize_session_id(session_id)
     session_history = _get_session_history(normalized_session_id)
@@ -882,6 +957,7 @@ async def sync_context(
     - `files`: 文件路径列表，文本/代码文件会自动转换为 `.txt/.md` 发送
     - `project_info`: 项目信息字典，可包含任意字段
     """
+    _mark_process_activity("sync_context")
     normalized_session_id = _normalize_session_id(session_id)
     logger.info(f"收到sync_context请求，操作: {operation}，会话: {normalized_session_id}")
 
@@ -1065,6 +1141,7 @@ async def report_progress(
     **使用场景**：执行上级 AI 建议后，报告执行结果并获取后续指导
     **参数**：actions_taken（已执行的行动）、result（success/failed/partial）、new_error（新错误）、feedback（反馈）
     """
+    _mark_process_activity("report_progress")
     config = get_aurai_config()
     normalized_session_id = _normalize_session_id(session_id)
     session_history = _get_session_history(normalized_session_id)
@@ -1134,12 +1211,15 @@ async def get_status(
     ---
     **返回内容**：conversation_history_count（对话历史数量）、max_iterations（最大迭代次数）、max_history（最大历史条数）、provider（AI提供商）、model（模型名称）
     """
+    _mark_process_activity("get_status")
     normalized_session_id = _normalize_session_id(session_id)
     return {
         "session_id": normalized_session_id,
         "conversation_history_count": len(_get_session_history(normalized_session_id)),
         "loaded_session_count": len(_loaded_sessions),
         "history_path": str(_get_history_file_for_session(normalized_session_id)),
+        "process_idle_seconds": round(_get_process_idle_seconds(), 2),
+        "stdio_idle_timeout_seconds": server_config.stdio_idle_timeout_seconds,
         "max_iterations": get_aurai_config().max_iterations,
         "max_history": server_config.max_history,
         "provider": get_aurai_config().provider,
@@ -1149,7 +1229,7 @@ async def get_status(
 
 def main():
     """主入口函数"""
-    global _conversation_history, _loaded_sessions
+    global _conversation_history, _loaded_sessions, _last_activity_at, _stdio_watchdog_started
 
     logger.info(f"启动 {server_config.name} MCP服务器")
     logger.info(f"AI提供商: {get_aurai_config().provider}")
@@ -1158,12 +1238,15 @@ def main():
     # 初始化对话历史持久化
     _conversation_history = {}
     _loaded_sessions = set()
+    _stdio_watchdog_started = False
+    _mark_process_activity("server_start")
     if server_config.enable_persistence:
         _ensure_session_loaded(DEFAULT_SESSION_ID)
         logger.info(f"持久化已启用,默认历史文件: {server_config.history_path}")
     else:
         logger.info("持久化未启用,使用内存模式")
 
+    _start_stdio_idle_watchdog()
     mcp.run()
 
 

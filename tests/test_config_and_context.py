@@ -21,6 +21,8 @@ def test_env_variables_are_applied_to_config(monkeypatch):
     monkeypatch.setenv("AURAI_ENABLE_HISTORY_SUMMARY", "false")
     monkeypatch.setenv("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "4")
     monkeypatch.setenv("AURAI_HISTORY_SUMMARY_TRIGGER", "9")
+    monkeypatch.setenv("AURAI_STDIO_IDLE_TIMEOUT_SECONDS", "321")
+    monkeypatch.setenv("AURAI_STDIO_IDLE_CHECK_INTERVAL_SECONDS", "7")
     monkeypatch.setenv("AURAI_API_KEY", "test-api-key-12345")
     monkeypatch.setenv("AURAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setenv("AURAI_MODEL", "test-model")
@@ -40,6 +42,8 @@ def test_env_variables_are_applied_to_config(monkeypatch):
     assert server_config.enable_history_summary is False
     assert server_config.history_summary_keep_recent == 4
     assert server_config.history_summary_trigger_entries == 9
+    assert server_config.stdio_idle_timeout_seconds == 321
+    assert server_config.stdio_idle_check_interval_seconds == 7
 
 
 def test_build_consult_prompt_includes_answers_and_extra_context():

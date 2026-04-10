@@ -215,6 +215,22 @@ class ServerConfig(BaseModel):
         description="触发历史摘要的原始记录数阈值"
     )
 
+    # stdio 服务空闲自动退出时间（秒）
+    stdio_idle_timeout_seconds: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_STDIO_IDLE_TIMEOUT_SECONDS", "600")),
+        ge=0,
+        le=86400,
+        description="stdio 服务空闲自动退出时间（秒，0 表示禁用）"
+    )
+
+    # stdio 空闲检查间隔（秒）
+    stdio_idle_check_interval_seconds: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_STDIO_IDLE_CHECK_INTERVAL_SECONDS", "30")),
+        ge=1,
+        le=3600,
+        description="stdio 空闲检查间隔（秒）"
+    )
+
 
 # 全局配置实例
 _config: AuraiConfig | None = None

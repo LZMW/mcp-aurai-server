@@ -144,6 +144,8 @@ class AuraiConfigTool:
             ("AURAI_HISTORY_PATH", "历史文件路径（可选，自定义默认会话历史位置）", "entry", None),
             ("AURAI_LOG_LEVEL", "日志级别（DEBUG/INFO/WARNING/ERROR）", "entry", None),
             ("AURAI_HISTORY_LOCK_TIMEOUT", "历史文件锁超时（秒，默认 10）", "entry", None),
+            ("AURAI_STDIO_IDLE_TIMEOUT_SECONDS", "stdio 空闲自动退出时间（秒，默认 600；0 为禁用）", "entry", None),
+            ("AURAI_STDIO_IDLE_CHECK_INTERVAL_SECONDS", "stdio 空闲检查间隔（秒，默认 30）", "entry", None),
             ("AURAI_ENABLE_HISTORY_SUMMARY", "启用历史摘要（true/false）", "entry", None),
             ("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "摘要后保留最近原始轮次（默认 3）", "entry", None),
             ("AURAI_HISTORY_SUMMARY_TRIGGER", "触发历史摘要阈值（默认 8）", "entry", None),
@@ -647,6 +649,8 @@ class AuraiConfigTool:
                 f.write("# AURAI_HISTORY_PATH        - 默认会话历史文件路径（可选）\n")
                 f.write("# AURAI_LOG_LEVEL           - 日志级别（默认 INFO）\n")
                 f.write("# AURAI_HISTORY_LOCK_TIMEOUT - 历史文件锁等待时间（秒，默认 10）\n")
+                f.write("# AURAI_STDIO_IDLE_TIMEOUT_SECONDS - stdio 空闲自动退出时间（秒，默认 600；0 为禁用）\n")
+                f.write("# AURAI_STDIO_IDLE_CHECK_INTERVAL_SECONDS - stdio 空闲检查间隔（秒，默认 30）\n")
                 f.write("# AURAI_ENABLE_HISTORY_SUMMARY - 是否启用历史摘要（默认 true）\n")
                 f.write("# AURAI_HISTORY_SUMMARY_KEEP_RECENT - 摘要后保留最近原始轮次（默认 3）\n")
                 f.write("# AURAI_HISTORY_SUMMARY_TRIGGER - 触发历史摘要阈值（默认 8）\n")
@@ -1021,6 +1025,7 @@ DeepSeek: https://api.deepseek.com/v1
 • 支持历史文件锁与原子写入
 • 支持较早历史自动摘要
 • 可通过下方新增字段调整摘要保留轮次和触发阈值
+• 支持 stdio 空闲自动退出，减少后台残留实例
 
 【文件上传】
 • sync_context 现在可以直接上传代码/配置等文本文件

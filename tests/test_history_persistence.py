@@ -28,6 +28,8 @@ class FakeClient:
 def reset_server_state(server):
     server._conversation_history.clear()
     server._loaded_sessions.clear()
+    server._stdio_watchdog_started = False
+    server._last_activity_at = 0
 
 
 @pytest.fixture
@@ -370,6 +372,32 @@ def test_save_history_uses_atomic_replace_and_cleans_temp_files(server_module, t
     assert target_path == history_path
     assert temp_path.suffix == ".tmp"
     assert not temp_path.exists()
+
+
+def test_mark_process_activity_refreshes_idle_clock(server_module):
+    server = server_module
+    server._last_activity_at = 100.0
+
+    server._mark_process_activity("unit-test")
+
+    assert server._last_activity_at > 100.0
+
+
+def test_should_exit_for_stdio_idle_respects_timeout(server_module):
+    server = server_module
+    server.server_config.stdio_idle_timeout_seconds = 10
+    server._last_activity_at = 100.0
+
+    assert server._should_exit_for_stdio_idle(now=109.9) is False
+    assert server._should_exit_for_stdio_idle(now=110.0) is True
+
+
+def test_should_exit_for_stdio_idle_can_be_disabled(server_module):
+    server = server_module
+    server.server_config.stdio_idle_timeout_seconds = 0
+    server._last_activity_at = 100.0
+
+    assert server._should_exit_for_stdio_idle(now=999.0) is False
 
 
 def test_history_summary_compacts_older_entries(server_module, tmp_path):
