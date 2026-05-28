@@ -102,6 +102,14 @@ class AuraiConfig(BaseModel):
         description="最大生成 tokens（默认：32,000，基于 GLM-4.7 优化）"
     )
 
+    # 上下文高水位线 — 输入占用超过此比例时触发预警和主动压缩
+    context_high_watermark: float = Field(
+        default_factory=lambda: float(os.getenv("AURAI_CONTEXT_HIGH_WATERMARK", "0.85")),
+        ge=0.5,
+        le=1.0,
+        description="上下文高水位线（默认 0.85 = 85%）。输入超过此比例时返回预警并主动压缩历史"
+    )
+
     @field_validator('api_key')
     @classmethod
     def validate_api_key(cls, v: str) -> str:

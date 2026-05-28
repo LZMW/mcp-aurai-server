@@ -22,7 +22,15 @@ class FakeClient:
     async def chat(self, **kwargs):
         if self.recorder is not None:
             self.recorder["kwargs"] = kwargs
-        return self.response
+        return self.response, {
+            "estimated_input_tokens": 5000,
+            "output_limit_tokens": 32000,
+            "context_window": 200000,
+            "used_pct": 2.5,
+            "high_watermark_pct": 85,
+            "warning": False,
+            "warning_message": None,
+        }
 
 
 def reset_server_state(server):

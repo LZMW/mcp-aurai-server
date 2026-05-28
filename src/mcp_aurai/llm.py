@@ -283,15 +283,15 @@ class AuraiClient:
         base_messages: list[dict[str, str]],
         history_groups: list[dict[str, object]],
         current_user_message: dict[str, str],
-    ) -> tuple[list[dict[str, str]], int, int]:
+    ) -> tuple[list[dict[str, str]], int, int, bool]:
         """
         将请求消息压进上下文窗口。
 
-        优先保证输出预算 (max_tokens)，不满时才裁剪输入历史。
-        仅当基础消息本身超过窗口时才会降低输出上限。
+        优先保证输出预算 (max_tokens)，输入超限时裁剪历史。
+        超过高水位线时触发预警 + 主动压缩历史。
 
         Returns:
-            (最终消息列表, 估算输入 tokens, 实际输出上限)
+            (最终消息列表, 估算输入 tokens, 实际输出上限, 是否触发水位线预警)
         """
         required_messages = [*base_messages, current_user_message]
         required_prompt_tokens = self._estimate_messages_tokens(required_messages)
@@ -299,45 +299,56 @@ class AuraiClient:
         input_budget = max(self.config.context_window - output_budget, 1)
 
         if required_prompt_tokens > input_budget:
-            # 基础消息本身就超过输入预算，只能牺牲输出
             available_output = max(self.config.context_window - required_prompt_tokens, 1)
             output_budget = min(self.config.max_tokens, available_output)
             input_budget = max(self.config.context_window - output_budget, 1)
 
         history_budget = max(input_budget - required_prompt_tokens, 0)
-        selected_history_messages, trimmed = self._select_history_messages_within_budget(
+        selected_history_messages, history_trimmed = self._select_history_messages_within_budget(
             history_groups,
             history_budget,
         )
 
         final_messages = [*base_messages, *selected_history_messages, current_user_message]
         prompt_tokens = self._estimate_messages_tokens(final_messages)
+        watermark_hit = prompt_tokens >= self.config.context_window * self.config.context_high_watermark
 
-        if trimmed:
+        if watermark_hit:
+            # 超过高水位线：再压一轮历史，给输出腾空间
+            tighter_budget = max(int(history_budget * 0.5), 0)
+            selected_history_messages, _ = self._select_history_messages_within_budget(
+                history_groups,
+                tighter_budget,
+            )
+            final_messages = [*base_messages, *selected_history_messages, current_user_message]
+            prompt_tokens = self._estimate_messages_tokens(final_messages)
             logger.warning(
-                "上下文窗口不足，已裁剪部分历史消息以保障输出预算。输入约 %s tokens，输出上限 %s",
+                "上下文使用率超过 %.0f%% 高水位线，已主动压缩历史。输入: %s tokens，输出上限: %s",
+                self.config.context_high_watermark * 100,
                 prompt_tokens,
                 output_budget,
             )
 
-        return final_messages, prompt_tokens, output_budget
+        elif history_trimmed:
+            logger.warning(
+                "上下文窗口不足，已裁剪部分历史消息。输入约 %s tokens，输出上限 %s",
+                prompt_tokens,
+                output_budget,
+            )
+
+        return final_messages, prompt_tokens, output_budget, watermark_hit
 
     async def chat(
         self,
         user_message: str,
         system_prompt: str | None = None,
         conversation_history: list[dict] | None = None,
-    ) -> dict:
+    ) -> tuple[dict, dict]:
         """
-        发送聊天请求
-
-        Args:
-            user_message: 用户消息
-            system_prompt: 系统提示词
-            conversation_history: 对话历史（用于多轮对话）
+        发送聊天请求。
 
         Returns:
-            解析后的JSON响应
+            (解析后的 JSON 响应, token_usage 字典)
         """
         from .prompts import SYSTEM_PROMPT, CONSULT_RESPONSE_SCHEMA
 
@@ -349,18 +360,40 @@ class AuraiClient:
 
         history_groups = self._build_message_groups_from_history(conversation_history)
         current_user_message = {"role": "user", "content": user_message}
-        messages, prompt_tokens, response_max_tokens = self._fit_messages_to_context_window(
-            base_messages,
-            history_groups,
-            current_user_message,
+        messages, prompt_tokens, response_max_tokens, watermark_warning = (
+            self._fit_messages_to_context_window(
+                base_messages,
+                history_groups,
+                current_user_message,
+            )
         )
 
+        usage_pct = round(prompt_tokens / max(self.config.context_window, 1) * 100, 1)
+        token_usage = {
+            "estimated_input_tokens": prompt_tokens,
+            "output_limit_tokens": response_max_tokens,
+            "context_window": self.config.context_window,
+            "used_pct": usage_pct,
+            "high_watermark_pct": int(self.config.context_high_watermark * 100),
+        }
+
+        if watermark_warning or usage_pct >= self.config.context_high_watermark * 100:
+            token_usage["warning"] = True
+            token_usage["warning_message"] = (
+                f"上下文窗口已使用 {usage_pct}%（阈值 {token_usage['high_watermark_pct']}%），"
+                "建议用 sync_context(operation='clear') 清空历史或减少上传文件"
+            )
+        else:
+            token_usage["warning"] = False
+            token_usage["warning_message"] = None
+
         logger.info(
-            "发送请求到 %s，消息数: %s，估算输入 tokens: %s，输出上限: %s",
+            "发送请求到 %s，消息数: %s，输入: %s tokens，输出上限: %s，使用率: %s%%",
             self.config.base_url,
             len(messages),
             prompt_tokens,
             response_max_tokens,
+            usage_pct,
         )
 
         try:
@@ -373,11 +406,10 @@ class AuraiClient:
             )
 
             content = response.choices[0].message.content
-            logger.info(f"收到响应，长度: {len(content)}")
+            token_usage["response_length_chars"] = len(content)
+            logger.info("收到响应，长度: %s", len(content))
 
-            # 尝试解析JSON
             try:
-                # 清理可能存在的markdown代码块标记
                 content_clean = content.strip()
                 if content_clean.startswith("```json"):
                     content_clean = content_clean[7:]
@@ -388,10 +420,9 @@ class AuraiClient:
                 content_clean = content_clean.strip()
 
                 result = json.loads(content_clean)
-                logger.info("成功解析JSON响应")
-                return result
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON解析失败: {e}，返回原始文本")
+                return result, token_usage
+            except json.JSONDecodeError:
+                logger.warning("JSON解析失败，返回原始文本")
                 return {
                     "analysis": "解析失败",
                     "guidance": content,
@@ -399,7 +430,7 @@ class AuraiClient:
                     "needs_another_iteration": False,
                     "resolved": False,
                     "requires_human_intervention": True,
-                }
+                }, token_usage
 
         except Exception:
             logger.exception("API请求失败")
@@ -410,7 +441,7 @@ class AuraiClient:
                 "needs_another_iteration": False,
                 "resolved": False,
                 "requires_human_intervention": True,
-            }
+            }, token_usage
 
 
 # 全局客户端实例

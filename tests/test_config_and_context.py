@@ -161,12 +161,13 @@ async def test_chat_caps_output_tokens_by_context_window():
         max_message_tokens=5000,
         max_tokens=40,
         context_window=60,
+        context_high_watermark=1.0,
     )
     client._client = SimpleNamespace(
         chat=SimpleNamespace(completions=FakeCompletions())
     )
 
-    response = await client.chat(
+    response, token_usage = await client.chat(
         user_message="U" * 80,
         system_prompt="S" * 80,
         conversation_history=None,

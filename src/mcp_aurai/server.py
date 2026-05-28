@@ -737,7 +737,7 @@ async def consult_aurai(
 
     # 调用上级AI，传递对话历史
     client = get_aurai_client()
-    response = await client.chat(
+    response, token_usage = await client.chat(
         user_message=prompt,
         conversation_history=_get_history(normalized_session_id)
     )
@@ -759,6 +759,7 @@ async def consult_aurai(
             "message": "[提示] 上级顾问认为信息不足，请回答以下问题：",
             "questions_to_answer": response.get("questions", []),
             "instruction": "请搜集信息，再次调用 consult_aurai，并将答案填入 'answers_to_questions' 字段。",
+            "token_usage": token_usage,
             "related_tools_hint": {
                 "sync_context": {
                     "description": "如果需要上传文档（.md/.txt）来补充上下文信息",
@@ -783,6 +784,7 @@ async def consult_aurai(
             "needs_another_iteration": response.get("needs_another_iteration", False),
             "resolved": response.get("resolved", False),
             "requires_human_intervention": response.get("requires_human_intervention", False),
+            "token_usage": token_usage,
             "hint": "[提示] 如需咨询新问题，下次调用时设置 is_new_question=true。这将清空之前的所有对话历史（包括之前的问题和上级AI的指导），但当前这条新问题会正常处理并保留在新的对话中",
         }
 
@@ -798,6 +800,7 @@ async def consult_aurai(
         "needs_another_iteration": False,
         "resolved": False,
         "requires_human_intervention": True,
+        "token_usage": token_usage,
     }
 
 
@@ -1020,7 +1023,7 @@ async def report_progress(
 
     # 调用上级AI，传递对话历史
     client = get_aurai_client()
-    response = await client.chat(
+    response, token_usage = await client.chat(
         user_message=prompt,
         conversation_history=_get_history(normalized_session_id)
     )
@@ -1040,6 +1043,7 @@ async def report_progress(
         _clear_history(normalized_session_id, "report_progress 返回 resolved=true", log_prefix="[完成]")
 
     logger.info(f"report_progress完成，resolved: {response.get('resolved', False)}")
+    response["token_usage"] = token_usage
     return response
 
 
@@ -1053,6 +1057,7 @@ async def get_status(
     """查看当前会话状态：历史条数、迭代次数、模型、进程空闲时间等。用于排查或确认会话配置。"""
     _mark_process_activity("get_status")
     normalized_session_id = _normalize_session_id(session_id)
+    aurai_config = get_aurai_config()
     return {
         "session_id": normalized_session_id,
         "conversation_history_count": len(_get_session_history(normalized_session_id)),
@@ -1060,10 +1065,18 @@ async def get_status(
         "history_path": str(_get_history_file_for_session(normalized_session_id)),
         "process_idle_seconds": round(_get_process_idle_seconds(), 2),
         "stdio_idle_timeout_seconds": server_config.stdio_idle_timeout_seconds,
-        "max_iterations": get_aurai_config().max_iterations,
+        "max_iterations": aurai_config.max_iterations,
         "max_history": server_config.max_history,
-        "provider": get_aurai_config().provider,
-        "model": get_aurai_config().model,
+        "prompt_history_turns": server_config.prompt_history_turns,
+        "provider": aurai_config.provider,
+        "model": aurai_config.model,
+        "token_config": {
+            "context_window": aurai_config.context_window,
+            "max_tokens": aurai_config.max_tokens,
+            "max_message_tokens": aurai_config.max_message_tokens,
+            "high_watermark_pct": int(aurai_config.context_high_watermark * 100),
+            "temperature": aurai_config.temperature,
+        },
     }
 
 
