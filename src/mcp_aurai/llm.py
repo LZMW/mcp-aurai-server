@@ -363,6 +363,7 @@ class AuraiClient:
         response_format: Literal["text", "json_object"] = "json_object",
         conversation_history: list[dict] | None = None,
     ) -> dict:
+        # 注意: response_format 参数保留以兼容旧调用，但实际始终使用 JSON Schema
         """
         发送聊天请求
 
@@ -375,7 +376,7 @@ class AuraiClient:
         Returns:
             解析后的JSON响应
         """
-        from .prompts import SYSTEM_PROMPT
+        from .prompts import SYSTEM_PROMPT, CONSULT_RESPONSE_SCHEMA
 
         system_prompt = system_prompt or SYSTEM_PROMPT
 
@@ -405,6 +406,7 @@ class AuraiClient:
                 messages=messages,
                 temperature=self.config.temperature,
                 max_tokens=response_max_tokens,
+                response_format=CONSULT_RESPONSE_SCHEMA,
             )
 
             content = response.choices[0].message.content

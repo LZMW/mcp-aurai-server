@@ -1,6 +1,8 @@
 """MCP服务器主文件 - 上级顾问"""
 
 from contextlib import contextmanager
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import logging
@@ -51,6 +53,43 @@ SUMMARY_ENTRY_TYPE = "summary"
 
 # 单条摘要信息的最大显示长度
 SUMMARY_FIELD_LIMIT = 160
+
+
+def _is_parent_process_alive() -> bool:
+    """检测父进程（Claude Code）是否仍在运行。
+
+    在 Windows 上通过 OpenProcess + GetExitCodeProcess 检查父进程状态，
+    避免因权限不足或父进程为系统进程时误判。始终假设 '不确定时父进程存活'，
+    宁可保留孤儿实例也不意外杀正常服务。
+    """
+    ppid = os.getppid()
+    if ppid == 0:
+        return False
+    if ppid == 1:
+        # Windows 上 ppid=1 通常意味着父进程已退出并被 system 进程接管
+        return False
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, ppid)
+        if not handle:
+            return True  # 拿不到句柄 – 假设还活着
+
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            kernel32.CloseHandle(handle)
+            return True
+
+        kernel32.CloseHandle(handle)
+        if exit_code.value != STILL_ACTIVE:
+            logger.debug("父进程 %s 已退出（exit_code=%d）", ppid, exit_code.value)
+            return False
+        return True
+    except OSError:
+        return True  # 无法检查 – 假设还活着
 
 
 def _mark_process_activity(reason: str = ""):
@@ -108,12 +147,19 @@ def _start_stdio_idle_watchdog():
             time.sleep(server_config.stdio_idle_check_interval_seconds)
             idle_seconds = _get_process_idle_seconds()
             if _should_exit_for_stdio_idle():
-                logger.warning(
-                    "stdio 服务已空闲 %.1f 秒，达到退出阈值 %s 秒，进程将自动结束",
-                    idle_seconds,
-                    server_config.stdio_idle_timeout_seconds,
-                )
-                os._exit(0)
+                if _is_parent_process_alive():
+                    logger.debug(
+                        "stdio 服务已空闲 %.1f 秒，但父进程仍存活，跳过自动退出",
+                        idle_seconds,
+                    )
+                    # 重置活动时间戳，避免下一轮检查立即触发
+                    _mark_process_activity("idle-watchdog-reset")
+                else:
+                    logger.warning(
+                        "stdio 服务已空闲 %.1f 秒且父进程已退出，进程将自动结束",
+                        idle_seconds,
+                    )
+                    os._exit(0)
 
     thread = threading.Thread(
         target=watchdog,
@@ -568,156 +614,40 @@ def _save_history_to_file(session_id: str | None = None):
 @mcp.tool()
 async def consult_aurai(
     problem_type: str = Field(
-        description="问题类型: runtime_error, syntax_error, design_issue, other"
+        description="问题类型: runtime_error / syntax_error / design_issue / other"
     ),
-    error_message: str = Field(description="错误描述"),
-    code_snippet: str | None = Field(default=None, description="相关代码片段"),
-    context: Any = Field(default=None, description="上下文信息（支持 JSON 字符串或字典，会自动解析）"),
-    attempts_made: str | None = Field(default=None, description="已尝试的解决方案"),
+    error_message: str = Field(description="具体错误信息或问题描述。要尽可能详细，包含复现步骤"),
+    code_snippet: str | None = Field(
+        default=None,
+        description="相关代码片段。如果代码较长，改用 sync_context 上传完整文件",
+    ),
+    context: Any = Field(
+        default=None,
+        description="补充上下文（字典或 JSON 字符串）。可包含: file_path, terminal_output, 环境信息等",
+    ),
+    attempts_made: str | None = Field(default=None, description="已经尝试过但没成功的方案"),
     answers_to_questions: str | None = Field(
         default=None,
-        description="对上级顾问反问的回答（仅在多轮对话时使用）"
+        description="对上级顾问反问的回答。收到 need_info 后，搜集信息填入此字段再次调用",
     ),
     is_new_question: bool = Field(
         default=False,
-        description="[重要] 是否为新问题（新问题会清空之前的所有对话历史，确保干净的上下文）"
+        description="设为 true 清空历史开始新对话。用于切换到不相关的新问题",
     ),
     session_id: str | None = Field(
         default=None,
-        description="会话标识。留空时使用默认会话；建议不同任务/线程使用不同 session_id 隔离上下文。"
+        description="会话隔离标识。不同任务用不同 ID 避免上下文串扰",
     ),
 ) -> dict[str, Any]:
-    """
-    请求上级AI的指导（支持交互对齐机制与多轮对话）
+    """向远程技术顾问咨询编程问题。支持多轮对话：顾问反问 → 你搜集信息 → 再次调用。
 
-    这是核心工具，当本地AI遇到编程问题时调用此工具获取上级AI的指导建议。
+    典型流程:
+    1. 上传相关代码: sync_context(files=['src/main.py', ...])
+    2. 首次咨询: consult_aurai(problem_type='runtime_error', error_message='...', context={...})
+    3. 如返回 status='need_info' → 按 questions_to_answer 搜集信息 → 再次调用，填入 answers_to_questions
+    4. 如返回 status='success' → 按 action_items 执行 → 用 report_progress 汇报结果
 
-    ---
-
-    **🔗 相关工具**
-
-    - **sync_context**：需要上传文档或代码时使用
-      - 📄 上传文章、说明文档（.md/.txt）
-      - 💻 **上传代码文件（避免内容被截断）** ⭐ 重要
-      - 将 `.py/.js/.json` 等代码文件复制为 `.txt` 后上传
-
-    - **report_progress**：执行上级 AI 建议后，使用此工具报告进度并获取下一步指导
-
-    - **get_status**：查看当前对话状态、迭代次数、配置信息
-
-    **💡 重要提示：避免内容被截断**
-
-    如果 `code_snippet` 或 `context` 内容过长，**请使用 `sync_context` 上传文件**：
-
-    ```python
-    # 步骤 1：直接上传代码文件（会自动转成文本发送）
-    sync_context(operation='incremental', files=['script.py'])
-
-    # 步骤 2：告诉上级顾问文件已上传
-    consult_aurai(
-        error_message='请审查已上传的 script.py 文件'
-    )
-    ```
-
-    **优势**：
-    - ✅ 避免代码在 `context` 或 `answers_to_questions` 字段中被截断
-    - ✅ 利用文件读取机制，完整传递内容
-    - ✅ 支持任意大小的代码文件
-
-    ---
-
-    ## [重要] 何时开始新对话？
-
-    **系统会自动检测**，但你也可以手动控制：
-
-    - **自动清空**：当上一次对话返回 `resolved=true` 时，系统会自动清空历史
-    - **手动清空**：如果你要讨论一个完全不同的新问题，设置 `is_new_question=true`
-
-    **何时设置 `is_new_question=true`？**
-    - [OK] 切换到完全不相关的项目/文件
-    - [OK] 之前的问题已解决，现在遇到全新的问题
-    - [OK] 发现上下文混乱，想重新开始
-    - [X] 不要在同一个问题的多轮对话中使用
-
-    ## 交互协议
-
-    ### 1. 多轮对齐机制
-    - **不要期待一次成功**：上级顾问可能会认为信息不足，返回反问问题
-    - 仔细阅读 `questions_to_answer` 中的每个问题
-    - 主动搜集信息（读取文件、检查日志、运行命令）
-    - **再次调用** 此工具，将答案填入 `answers_to_questions` 参数
-
-    ### 2. 首次调用
-    必须提供：
-    - `problem_type`：问题类型（runtime_error/syntax_error/design_issue/other）
-    - `error_message`：清晰描述问题或错误
-    - `context`：相关上下文（代码片段、环境信息、已尝试的方案）
-    - `code_snippet`：相关代码（如果有）
-
-    ### 3. 后续调用（当返回 status="need_info" 时）
-    必须提供：
-    - `answers_to_questions`：对上级顾问反问的详细回答
-    - 保持其他参数不变（除非有新信息）
-
-    ### 4. 诚实原则
-    - **禁止瞎编**：如果不知道答案，诚实说明"未找到相关信息"
-    - **禁止臆测**：不要在没有证据的情况下假设解决方案
-    - 提供具体证据（文件路径、日志内容、错误堆栈）
-
-    ## 响应格式
-
-    ### 信息不足时 (status="need_info")
-    ```json
-    {
-      "status": "need_info",
-      "questions_to_answer": ["问题1", "问题2"],
-      "instruction": "请搜集信息并再次调用"
-    }
-    ```
-
-    ### 提供指导时 (status="success")
-    ```json
-    {
-      "status": "success",
-      "analysis": "问题分析",
-      "guidance": "解决建议",
-      "action_items": ["步骤1", "步骤2"],
-      "resolved": false  // 是否已完全解决
-    }
-    ```
-
-    ### 问题解决后
-    当 `resolved=true` 时，对话历史会自动清空，下次查询将开始新对话。
-
-    ### [自动] 新对话检测
-    系统会自动检测新问题：
-    - 如果上一次对话的 `resolved=true`，下次调用 `consult_aurai` 时会自动清空历史
-    - 保证每个独立问题都有干净的上下文，避免干扰
-
-    ### [重要] 明确标注新问题（可选参数）
-    如果你想强制开始一个新对话，可以设置 `is_new_question=true`：
-    - **效果**：立即清空所有之前的对话历史
-    - **后果**：上级AI将无法看到之前的任何上下文
-    - **使用场景**：
-      - 之前的对话已完全无关
-      - 想重新开始讨论一个全新的问题
-      - 发现上下文混乱，想重置
-
-    **示例**：
-    ```python
-    # 第一次咨询（问题A）
-    consult_aurai(problem_type="runtime_error", error_message="...")
-
-    # 继续讨论问题A...
-    consult_aurai(answers_to_questions="...")
-
-    # 切换到问题B（标注为新问题，清空历史）
-    consult_aurai(
-        problem_type="design_issue",
-        error_message="...",
-        is_new_question=True  # [注意] 会清空之前关于问题A的所有对话
-    )
-    ```
+    is_new_question=true 会清空当前会话的全部历史。resolved=true 的对话结束后自动清空，无需手动设置。
     """
     _mark_process_activity("consult_aurai")
     config = get_aurai_config()
@@ -842,120 +772,30 @@ async def consult_aurai(
 @mcp.tool()
 async def sync_context(
     operation: str = Field(
-        description="操作类型: full_sync（完整同步）, incremental（增量添加）, clear（清空历史）"
+        description="full_sync（首次/重建完整上下文）/ incremental（追加文件）/ clear（清空历史）"
     ),
     files: Any = Field(
         default=None,
-        description="文件路径列表（支持 JSON 字符串或列表，会自动解析）。`.md/.txt` 会直接上传，代码/配置等文本文件会自动转换为 `.txt/.md` 后发送给上级顾问；明显的二进制文件会被跳过。"
+        description="文件路径列表（支持列表或 JSON 字符串数组）。文本/代码文件自动发送，二进制文件会被跳过",
     ),
     project_info: Any = Field(
         default=None,
-        description="项目信息字典，可包含项目名称、技术栈、任务描述等任意字段（支持 JSON 字符串或字典，会自动解析）"
+        description="项目背景信息（字典或 JSON 字符串）。如 project_name, tech_stack, description 等",
     ),
     session_id: str | None = Field(
         default=None,
-        description="会话标识。留空时使用默认会话；建议不同任务/线程使用不同 session_id 隔离上下文。"
+        description="会话隔离标识。不同任务用不同 ID 避免上下文串扰",
     ),
 ) -> dict[str, Any]:
-    """
-    同步代码上下文（支持上传 .md 和 .txt 文件，避免内容被截断）
+    """上传文件内容和项目背景给远程顾问。顾问无法直接读你的文件系统，必须先 sync 它才能看到。
 
-    在第一次调用或上下文发生重大变化时使用，让上级AI了解当前项目的整体情况。
+    何时调用:
+    - 首次咨询前: sync_context(operation='full_sync', files=['关键代码文件', ...], project_info={...})
+    - 顾问要求看更多代码: sync_context(operation='incremental', files=['新文件', ...])
+    - 代码有重大改动后: 同上
 
-    ---
-
-    **🎯 典型使用场景**
-
-    ### 场景 1：上传文章供上级顾问评审
-
-    ```python
-    sync_context(
-        operation='full_sync',
-        files=['文章.md'],
-        project_info={
-            'task': 'article_review',
-            'target_platform': 'GLM Coding 知识库'
-        }
-    )
-    consult_aurai(
-        problem_type='other',
-        error_message='请评审以下投稿文章...',
-        context={'请查看已上传的文章文件': '已通过 sync_context 上传'}
-    )
-    ```
-
-    ### 场景 2：上传代码文件（避免内容被截断）⭐ 重要
-
-    ```python
-    # 问题：代码太长，在 context 字段中可能被截断
-    # 解决：直接上传代码文件，系统会自动转成文本发送给上级顾问
-    # 步骤 1：上传文件
-    sync_context(
-        operation='incremental',
-        files=['src/main.py'],
-        project_info={
-            'description': '需要调试的代码',
-            'language': 'Python'
-        }
-    )
-
-    # 步骤 2：告诉上级顾问文件已上传
-    consult_aurai(
-        problem_type='runtime_error',
-        error_message='请审查已上传的 src/main.py 文件，帮我找出bug',
-        context={
-            'file_location': '已通过 sync_context 上传',
-            'expected_behavior': '应该输出...',
-            'actual_behavior': '实际输出...'
-        }
-    )
-    ```
-
-    **优势**：
-    - ✅ 避免代码在 `context` 或 `answers_to_questions` 字段中被截断
-    - ✅ 利用 sync_context 的文件读取机制，完整传递内容
-    - ✅ 上级顾问可以完整读取代码文件
-
-    ### 场景 3：项目首次初始化
-
-    ```python
-    sync_context(
-        operation='full_sync',
-        files=['README.md', 'docs/说明文档.md'],
-        project_info={
-            'project_name': 'My Project',
-            'tech_stack': 'Python + FastAPI'
-        }
-    )
-    ```
-
-    ---
-
-    ## [注意] 文件上传限制
-
-    **files 参数优先支持文本文件，会自动转换代码/配置文件为文本发送！**
-
-    - [OK] 支持：`README.md`, `docs.txt`, `notes.md`, `main.py`, `config.json`, `docker-compose.yml` 等文本内容
-    - [X] 跳过：图片、压缩包、可执行文件等明显二进制文件
-
-    ## 使用场景
-
-    1. **full_sync**: 完整同步，适合首次调用或项目重大变更
-    2. **incremental**: 增量同步，适合添加新文件或更新
-    3. **clear**: 清空对话历史
-
-    ## Token优化
-
-    当 project_info 中的单个字段超过 800 tokens 时，会自动：
-    - 缓存到临时文件
-    - 在对话历史中记录文件路径
-    - 发送给上级AI时仍会读取完整内容
-
-    ## 参数说明
-
-    - `operation`: 操作类型（full_sync/incremental/clear）
-    - `files`: 文件路径列表，文本/代码文件会自动转换为 `.txt/.md` 发送
-    - `project_info`: 项目信息字典，可包含任意字段
+    支持的文件类型: .py .js .ts .tsx .java .go .rs .cpp .c .json .yaml .yml .toml .md .txt .ini .cfg .env 等文本文件。
+    图片、压缩包、可执行文件等二进制内容会被自动跳过。
     """
     _mark_process_activity("sync_context")
     normalized_session_id = _normalize_session_id(session_id)
@@ -1123,23 +963,19 @@ async def sync_context(
 
 @mcp.tool()
 async def report_progress(
-    actions_taken: str = Field(description="已执行的行动"),
-    result: str = Field(description="执行结果: success, failed, partial"),
-    new_error: str | None = Field(default=None, description="新的错误信息"),
-    feedback: str | None = Field(default=None, description="执行反馈"),
+    actions_taken: str = Field(description="具体做了什么操作，越详细越好"),
+    result: str = Field(description="执行结果: success（成功）/ failed（失败）/ partial（部分成功）"),
+    new_error: str | None = Field(default=None, description="执行后出现的新错误（如有）"),
+    feedback: str | None = Field(default=None, description="对执行结果的补充说明或疑问"),
     session_id: str | None = Field(
         default=None,
-        description="会话标识。留空时使用默认会话；建议不同任务/线程使用不同 session_id 隔离上下文。"
+        description="会话隔离标识。需与 consult_aurai 使用相同的 session_id",
     ),
 ) -> dict[str, Any]:
-    """
-    报告执行进度，请求下一步指导
+    """按顾问指导执行操作后，汇报结果并获取下一步指示。
 
-    在执行了上级AI的建议后，调用此工具报告结果，获取下一步指导。
-
-    ---
-    **使用场景**：执行上级 AI 建议后，报告执行结果并获取后续指导
-    **参数**：actions_taken（已执行的行动）、result（success/failed/partial）、new_error（新错误）、feedback（反馈）
+    在 consult_aurai 返回 guidance/action_items 之后使用。如果改完问题没解决，
+    继续用此工具汇报新进展，形成迭代循环直到 resolved=true。
     """
     _mark_process_activity("report_progress")
     config = get_aurai_config()
@@ -1200,17 +1036,10 @@ async def report_progress(
 async def get_status(
     session_id: str | None = Field(
         default=None,
-        description="会话标识。留空时使用默认会话。"
+        description="会话标识。留空查默认会话",
     ),
 ) -> dict[str, Any]:
-    """
-    获取当前状态
-
-    返回当前对话状态、迭代次数、配置信息等。
-
-    ---
-    **返回内容**：conversation_history_count（对话历史数量）、max_iterations（最大迭代次数）、max_history（最大历史条数）、provider（AI提供商）、model（模型名称）
-    """
+    """查看当前会话状态：历史条数、迭代次数、模型、进程空闲时间等。用于排查或确认会话配置。"""
     _mark_process_activity("get_status")
     normalized_session_id = _normalize_session_id(session_id)
     return {
