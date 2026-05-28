@@ -72,7 +72,7 @@ async def test_sync_context_clear_persists_empty_history(server_module, tmp_path
     server = server_module
     history_path = configure_persistence(server, tmp_path)
 
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "other",
         "error_message": "旧问题",
@@ -169,7 +169,7 @@ async def test_consult_resolved_clears_persisted_history(server_module, tmp_path
     server = server_module
     history_path = configure_persistence(server, tmp_path)
 
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "runtime_error",
         "error_message": "旧错误",
@@ -216,7 +216,7 @@ async def test_report_progress_resolved_clears_persisted_history(server_module, 
     server = server_module
     history_path = configure_persistence(server, tmp_path)
 
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "runtime_error",
         "error_message": "旧错误",
@@ -270,8 +270,8 @@ async def test_sync_context_clear_only_affects_target_session(server_module, tmp
         "error_message": "beta",
         "response": {"resolved": False},
     }
-    server._add_to_history(alpha_entry, "alpha")
-    server._add_to_history(beta_entry, "beta")
+    await server._add_to_history(alpha_entry, "alpha")
+    await server._add_to_history(beta_entry, "beta")
 
     alpha_history_path = server._get_history_file_for_session("alpha")
     beta_history_path = server._get_history_file_for_session("beta")
@@ -295,13 +295,13 @@ async def test_consult_uses_only_target_session_history(server_module, tmp_path,
     server = server_module
     configure_persistence(server, tmp_path)
 
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "runtime_error",
         "error_message": "alpha-history",
         "response": {"resolved": False},
     }, "alpha")
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "runtime_error",
         "error_message": "beta-history",
@@ -354,7 +354,8 @@ def test_history_file_lock_times_out_when_already_held(server_module, tmp_path):
                 pass
 
 
-def test_save_history_uses_atomic_replace_and_cleans_temp_files(server_module, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_save_history_uses_atomic_replace_and_cleans_temp_files(server_module, tmp_path, monkeypatch):
     server = server_module
     history_path = configure_persistence(server, tmp_path)
 
@@ -367,7 +368,7 @@ def test_save_history_uses_atomic_replace_and_cleans_temp_files(server_module, t
 
     monkeypatch.setattr(server.os, "replace", tracking_replace)
 
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "other",
         "error_message": "原子写入测试",
@@ -407,14 +408,28 @@ def test_should_exit_for_stdio_idle_can_be_disabled(server_module):
     assert server._should_exit_for_stdio_idle(now=999.0) is False
 
 
-def test_history_summary_compacts_older_entries(server_module, tmp_path):
+@pytest.mark.asyncio
+async def test_history_summary_compacts_older_entries(server_module, tmp_path, monkeypatch):
     server = server_module
     configure_persistence(server, tmp_path)
     # max_history=5 → trigger at 4 (80%), keep 3 (60%)
     server.server_config.max_history = 5
 
+    # Mock LLM client to return a synthetic summary
+    monkeypatch.setattr(
+        server,
+        "get_aurai_client",
+        lambda: FakeClient({
+            "status": "guiding",
+            "guidance": "LLM生成的测试摘要",
+            "analysis": "",
+            "action_items": [],
+            "resolved": False,
+        }),
+    )
+
     for index in range(5):
-        server._add_to_history({
+        await server._add_to_history({
             "type": "consult",
             "problem_type": "runtime_error",
             "error_message": f"问题{index}",
@@ -429,20 +444,33 @@ def test_history_summary_compacts_older_entries(server_module, tmp_path):
     assert len(history) == 4  # 1 summary + 3 kept recent
 
 
-def test_history_summary_keeps_latest_sync_context(server_module, tmp_path):
+@pytest.mark.asyncio
+async def test_history_summary_keeps_latest_sync_context(server_module, tmp_path, monkeypatch):
     server = server_module
     configure_persistence(server, tmp_path)
     # max_history=6 → trigger at 4 (80%), keep 3 (60%)
     server.server_config.max_history = 6
 
-    server._add_to_history({
+    monkeypatch.setattr(
+        server,
+        "get_aurai_client",
+        lambda: FakeClient({
+            "status": "guiding",
+            "guidance": "LLM生成的测试摘要",
+            "analysis": "",
+            "action_items": [],
+            "resolved": False,
+        }),
+    )
+
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "runtime_error",
         "error_message": "旧问题",
         "response": {"resolved": False},
     })
     # sync_context should be preserved by the keeper logic
-    server._add_to_history({
+    await server._add_to_history({
         "type": "sync_context",
         "operation": "incremental",
         "files": ["docs/old.md"],
@@ -450,19 +478,19 @@ def test_history_summary_keeps_latest_sync_context(server_module, tmp_path):
         "file_contents": {"docs/old.md": "重要上下文"},
         "project_info": {},
     })
-    server._add_to_history({
+    await server._add_to_history({
         "type": "progress",
         "actions_taken": "尝试一",
         "result": "partial",
         "response": {"resolved": False},
     })
-    server._add_to_history({
+    await server._add_to_history({
         "type": "consult",
         "problem_type": "runtime_error",
         "error_message": "较新问题",
         "response": {"resolved": False},
     })
-    server._add_to_history({
+    await server._add_to_history({
         "type": "progress",
         "actions_taken": "尝试二",
         "result": "failed",

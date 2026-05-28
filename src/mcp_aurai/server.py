@@ -337,97 +337,123 @@ def _truncate_summary_text(value: Any, limit: int = SUMMARY_FIELD_LIMIT) -> str:
     return text[: max(limit - 1, 1)] + "…"
 
 
-def _summarize_history_entry(entry: dict[str, Any]) -> str:
-    """将单条历史记录压缩成一句纪要。"""
-    entry_type = entry.get("type", "unknown")
+def _format_history_entries_for_llm(entries: list[dict[str, Any]]) -> str:
+    """将一批历史记录格式化为适合 LLM 阅读的文本。"""
+    lines: list[str] = []
+    for i, entry in enumerate(entries, 1):
+        entry_type = entry.get("type", "unknown")
 
-    if entry_type == SUMMARY_ENTRY_TYPE:
-        covered = entry.get("covered_entry_count")
-        prefix = f"更早摘要（覆盖 {covered} 条）" if covered else "更早摘要"
-        return f"{prefix}: {_truncate_summary_text(entry.get('summary_text'), 240)}"
+        if entry_type == "consult":
+            lines.append(f"### 第{i}轮 · 咨询")
+            lines.append(f"- 问题类型: {entry.get('problem_type', 'unknown')}")
+            lines.append(f"- 错误描述: {entry.get('error_message', '')}")
+            if entry.get("had_answers"):
+                lines.append("- 本地 AI 已补充回答")
+            resp = entry.get("response", {})
+            if resp.get("questions"):
+                lines.append(f"- 顾问反问: {resp['questions']}")
+            if resp.get("analysis"):
+                lines.append(f"- 顾问分析: {resp['analysis']}")
+            if resp.get("guidance"):
+                lines.append(f"- 顾问建议: {resp['guidance']}")
+            lines.append("")
 
-    if entry_type == "consult":
-        response = entry.get("response", {})
-        parts = [
-            f"咨询：类型={entry.get('problem_type', 'unknown')}",
-            f"错误={_truncate_summary_text(entry.get('error_message'))}",
-        ]
-        if entry.get("had_answers"):
-            parts.append("已补充回答")
-        if response.get("analysis"):
-            parts.append(f"分析={_truncate_summary_text(response.get('analysis'))}")
-        elif response.get("guidance"):
-            parts.append(f"建议={_truncate_summary_text(response.get('guidance'))}")
-        parts.append(f"resolved={'是' if response.get('resolved') else '否'}")
-        return "；".join(parts)
+        elif entry_type == "progress":
+            lines.append(f"### 第{i}轮 · 进度报告")
+            lines.append(f"- 执行操作: {entry.get('actions_taken', '')}")
+            lines.append(f"- 执行结果: {entry.get('result', '')}")
+            if entry.get("new_error"):
+                lines.append(f"- 新错误: {entry['new_error']}")
+            resp = entry.get("response", {})
+            if resp.get("guidance"):
+                lines.append(f"- 顾问后续建议: {resp['guidance']}")
+            lines.append("")
 
-    if entry_type == "progress":
-        response = entry.get("response", {})
-        parts = [
-            f"进展：操作={_truncate_summary_text(entry.get('actions_taken'))}",
-            f"结果={entry.get('result', 'unknown')}",
-        ]
-        if entry.get("new_error"):
-            parts.append(f"新错误={_truncate_summary_text(entry.get('new_error'))}")
-        if entry.get("feedback"):
-            parts.append(f"反馈={_truncate_summary_text(entry.get('feedback'))}")
-        if response.get("guidance"):
-            parts.append(f"顾问建议={_truncate_summary_text(response.get('guidance'))}")
-        parts.append(f"resolved={'是' if response.get('resolved') else '否'}")
-        return "；".join(parts)
+        elif entry_type == "sync_context":
+            files = entry.get("files", [])
+            project_info = entry.get("project_info", {})
+            lines.append(f"### 第{i}轮 · 上下文同步")
+            if files:
+                lines.append(f"- 上传文件: {', '.join(files[:10])}")
+            if project_info:
+                lines.append(f"- 项目信息: {json.dumps(project_info, ensure_ascii=False, default=str)[:500]}")
+            lines.append("")
 
-    if entry_type == "sync_context":
-        files = entry.get("files", [])
-        file_names = [Path(file).name for file in files[:3]]
-        file_desc = ", ".join(file_names)
-        if len(files) > 3:
-            file_desc += f" 等{len(files)}个"
-
-        project_info = entry.get("project_info", {})
-        project_keys = ", ".join(list(project_info.keys())[:5]) if isinstance(project_info, dict) else ""
-
-        parts = [f"上下文同步：operation={entry.get('operation', 'unknown')}"]
-        if file_desc:
-            parts.append(f"文件={file_desc}")
-        if entry.get("temp_files"):
-            parts.append(f"大内容缓存={len(entry.get('temp_files', []))}")
-        if project_keys:
-            parts.append(f"项目字段={project_keys}")
-        return "；".join(parts)
-
-    return f"{entry_type}：{_truncate_summary_text(entry)}"
+    return "\n".join(lines)
 
 
-def _build_history_summary_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """将多条较早历史压成一条摘要记录。"""
+async def _generate_llm_summary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """调用上级 AI 将多条早期历史总结为结构化复盘报告。"""
     if not entries:
         return None
 
-    type_counts: dict[str, int] = {}
-    summary_lines: list[str] = []
+    history_text = _format_history_entries_for_llm(entries)
 
-    for entry in entries:
-        entry_type = entry.get("type", "unknown")
-        type_counts[entry_type] = type_counts.get(entry_type, 0) + 1
-        summary_lines.append(f"- {_summarize_history_entry(entry)}")
+    prompt = f"""你是远程技术顾问，正在协助本地 AI 排查编程问题。现在需要你对当前会话的早期对话进行复盘总结，以便之后的轮次能快速恢复上下文。
 
-    type_desc = "，".join(f"{entry_type}:{count}" for entry_type, count in type_counts.items())
-    summary_text = (
-        f"已压缩较早的 {len(entries)} 条历史记录。"
-        f"{f' 来源类型：{type_desc}。' if type_desc else ''}\n"
-        + "\n".join(summary_lines)
-    )
+## 输入
+以下是需要压缩的早期对话记录（按时间正序）：
+---
+{history_text}
+---
 
-    return {
-        "type": SUMMARY_ENTRY_TYPE,
-        "summary_text": summary_text,
-        "covered_entry_count": len(entries),
-        "covered_type_counts": type_counts,
-    }
+## 任务
+生成一份结构化的会话复盘报告，包含以下维度：
+
+### 1. 问题与目标
+- 原始问题是什么？本地 AI 想达成什么？
+- 涉及哪些关键文件（已同步的文件名）和技术栈？
+
+### 2. 已尝试方案与进展
+- 按时间线列出已执行的步骤和结果
+- 哪些方案有效？哪些无效？为什么？
+
+### 3. 当前状态
+- 问题是否已解决？
+- 如果未解决，当前卡在哪里？有哪些待验证的假设？
+
+### 4. 关键约束与上下文
+- 不能丢失的环境信息、配置参数
+- 本地 AI 的特殊偏好或限制
+
+## 输出要求
+- 总长度控制在 2000 字以内
+- 优先保留能指导后续排查的关键信息
+- 用中文输出，技术术语保留原文
+- 不需要问候语或"我已理解"之类的过渡句，直接输出报告内容"""
+
+    try:
+        client = get_aurai_client()
+        response, _ = await client.chat(
+            user_message=prompt,
+            system_prompt="你是经验丰富的技术顾问。请按照用户要求的格式输出，只输出报告内容本身。",
+        )
+        summary_text = response.get("guidance", "") or response.get("analysis", "") or str(response)
+        if not summary_text.strip() or summary_text == str(response):
+            # LLM 返回了不理想的格式，回退到原始拼接
+            summary_text = "\n".join(
+                f"- {_format_history_entries_for_llm([entry])[:300]}"
+                for entry in entries[:10]
+            )
+
+        return {
+            "type": SUMMARY_ENTRY_TYPE,
+            "summary_text": summary_text[:2500],  # 防止过长，允许略超 2000
+            "covered_entry_count": len(entries),
+        }
+    except Exception:
+        logger.exception("LLM 摘要生成失败，回退到截断拼接")
+        # 回退：用格式化文本截断
+        fallback = _format_history_entries_for_llm(entries[:10])
+        return {
+            "type": SUMMARY_ENTRY_TYPE,
+            "summary_text": fallback[:2000],
+            "covered_entry_count": len(entries),
+        }
 
 
-def _maybe_compact_history(session_id: str | None):
-    """接近 max_history 上限时，把最早轮次压缩成摘要，避免旧记录被直接丢弃。"""
+async def _maybe_compact_history(session_id: str | None):
+    """接近 max_history 上限时，由 LLM 将早期对话总结为结构化复盘报告。"""
     if not server_config.enable_history_summary:
         return
 
@@ -438,12 +464,12 @@ def _maybe_compact_history(session_id: str | None):
         if entry.get("type") != SUMMARY_ENTRY_TYPE
     ]
 
-    # 仅在接近上限时触发 —— 保留 80% 空间给原始记录
+    # 仅在接近上限时触发
     trigger_at = int(server_config.max_history * 0.8)
     if len(raw_indexes) < trigger_at:
         return
 
-    # 保留最近 60% 的原始记录，其余压缩
+    # 保留最近 60% 的原始记录，其余交给 LLM 压缩
     keep_count = int(server_config.max_history * 0.6)
     keep_indexes = set(raw_indexes[-keep_count:])
 
@@ -464,7 +490,9 @@ def _maybe_compact_history(session_id: str | None):
         return
 
     entries_to_summarize = [history[index] for index in summary_source_indexes]
-    summary_entry = _build_history_summary_entry(entries_to_summarize)
+    logger.info("会话 %r: 触发 LLM 摘要压缩 (%s 条 → 1 条报告)", normalized, len(entries_to_summarize))
+
+    summary_entry = await _generate_llm_summary(entries_to_summarize)
     if not summary_entry:
         return
 
@@ -475,10 +503,8 @@ def _maybe_compact_history(session_id: str | None):
 
     history[:] = new_history
     logger.info(
-        "会话 %r: 原始记录 %s 条接近上限 %s，已压缩 %s 条为摘要，保留 %s 条原始",
+        "会话 %r: LLM 摘要完成，压缩 %s 条，保留 %s 条原始记录",
         normalized,
-        len(raw_indexes),
-        server_config.max_history,
         len(entries_to_summarize),
         len(new_history) - 1,
     )
@@ -553,13 +579,13 @@ def _clear_history(
     return history_count
 
 
-def _add_to_history(entry: dict[str, Any], session_id: str | None = None):
-    """添加到某个会话的对话历史。"""
+async def _add_to_history(entry: dict[str, Any], session_id: str | None = None):
+    """添加到某个会话的对话历史，必要时触发 LLM 摘要压缩。"""
     normalized = _normalize_session_id(session_id)
     history = _get_session_history(normalized)
     history.append(entry)
 
-    _maybe_compact_history(normalized)
+    await _maybe_compact_history(normalized)
 
     # 最终兜底，避免极端配置下历史条数仍超限
     while len(history) > server_config.max_history:
@@ -769,7 +795,7 @@ async def consult_aurai(
     )
 
     # 记录到历史
-    _add_to_history({
+    await _add_to_history({
         "type": "consult",
         "problem_type": problem_type,
         "error_message": error_message,
@@ -955,7 +981,7 @@ async def sync_context(
             "file_contents": file_contents,  # 所有文件内容
             "project_info": optimized_project_info or {},
         }
-        _add_to_history(entry, normalized_session_id)
+        await _add_to_history(entry, normalized_session_id)
 
         auto_converted_count = sum(1 for item in uploaded_files if item["auto_converted"])
         logger.info(
@@ -1066,7 +1092,7 @@ async def report_progress(
     )
 
     # 记录到历史 — 存副本避免后续修改污染持久化数据
-    _add_to_history({
+    await _add_to_history({
         "type": "progress",
         "actions_taken": actions_taken,
         "result": result,
