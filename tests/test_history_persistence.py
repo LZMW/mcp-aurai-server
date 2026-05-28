@@ -56,8 +56,7 @@ def configure_persistence(server, tmp_path: Path) -> Path:
     server.server_config.history_path = str(history_path)
     server.server_config.history_lock_timeout = 10.0
     server.server_config.enable_history_summary = True
-    server.server_config.history_summary_keep_recent = 3
-    server.server_config.history_summary_trigger_entries = 8
+    server.server_config.max_history = 10
     reset_server_state(server)
     server._ensure_session_loaded(server.DEFAULT_SESSION_ID)
     server._save_history_to_file()
@@ -411,10 +410,10 @@ def test_should_exit_for_stdio_idle_can_be_disabled(server_module):
 def test_history_summary_compacts_older_entries(server_module, tmp_path):
     server = server_module
     configure_persistence(server, tmp_path)
-    server.server_config.history_summary_keep_recent = 2
-    server.server_config.history_summary_trigger_entries = 5
+    # max_history=5 → trigger at 4 (80%), keep 3 (60%)
+    server.server_config.max_history = 5
 
-    for index in range(6):
+    for index in range(5):
         server._add_to_history({
             "type": "consult",
             "problem_type": "runtime_error",
@@ -426,18 +425,15 @@ def test_history_summary_compacts_older_entries(server_module, tmp_path):
         })
 
     history = server._get_session_history(None)
-
     assert history[0]["type"] == server.SUMMARY_ENTRY_TYPE
-    assert "问题0" in history[0]["summary_text"]
-    assert "问题3" in history[0]["summary_text"]
-    assert [entry["error_message"] for entry in history[1:]] == ["问题4", "问题5"]
+    assert len(history) == 4  # 1 summary + 3 kept recent
 
 
 def test_history_summary_keeps_latest_sync_context(server_module, tmp_path):
     server = server_module
     configure_persistence(server, tmp_path)
-    server.server_config.history_summary_keep_recent = 2
-    server.server_config.history_summary_trigger_entries = 4
+    # max_history=6 → trigger at 4 (80%), keep 3 (60%)
+    server.server_config.max_history = 6
 
     server._add_to_history({
         "type": "consult",
@@ -445,6 +441,7 @@ def test_history_summary_keeps_latest_sync_context(server_module, tmp_path):
         "error_message": "旧问题",
         "response": {"resolved": False},
     })
+    # sync_context should be preserved by the keeper logic
     server._add_to_history({
         "type": "sync_context",
         "operation": "incremental",

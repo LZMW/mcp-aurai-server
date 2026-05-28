@@ -19,8 +19,7 @@ def test_env_variables_are_applied_to_config(monkeypatch):
     monkeypatch.setenv("AURAI_LOG_LEVEL", "debug")
     monkeypatch.setenv("AURAI_HISTORY_LOCK_TIMEOUT", "3.5")
     monkeypatch.setenv("AURAI_ENABLE_HISTORY_SUMMARY", "false")
-    monkeypatch.setenv("AURAI_HISTORY_SUMMARY_KEEP_RECENT", "4")
-    monkeypatch.setenv("AURAI_HISTORY_SUMMARY_TRIGGER", "9")
+    monkeypatch.setenv("AURAI_PROMPT_HISTORY_TURNS", "7")
     monkeypatch.setenv("AURAI_STDIO_IDLE_TIMEOUT_SECONDS", "321")
     monkeypatch.setenv("AURAI_STDIO_IDLE_CHECK_INTERVAL_SECONDS", "7")
     monkeypatch.setenv("AURAI_API_KEY", "test-api-key-12345")
@@ -40,8 +39,7 @@ def test_env_variables_are_applied_to_config(monkeypatch):
     assert server_config.log_level == "DEBUG"
     assert server_config.history_lock_timeout == 3.5
     assert server_config.enable_history_summary is False
-    assert server_config.history_summary_keep_recent == 4
-    assert server_config.history_summary_trigger_entries == 9
+    assert server_config.prompt_history_turns == 7
     assert server_config.stdio_idle_timeout_seconds == 321
     assert server_config.stdio_idle_check_interval_seconds == 7
 

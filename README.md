@@ -86,26 +86,32 @@ claude mcp remove "aurai-advisor" -s user
 | `AURAI_MAX_MESSAGE_TOKENS` | `150000` | ≥1 | 单个文件超过此值会自动拆分成多段发送 |
 | `AURAI_MAX_ITERATIONS` | `10` | 1–100 | 单个任务最多迭代轮数。达到后直接返回 `requires_human_intervention` |
 
-**上下文预算分配策略**: 优先保证 `AURAI_MAX_TOKENS` 的输出预算。当输入历史过大时裁剪历史消息，而不是压缩输出。仅当基础消息（系统提示词 + 当前问题）本身就超过窗口时才缩减输出上限。
+**上下文预算 & Token 监控**:
+
+| 环境变量 | 默认值 | 范围 | 说明 |
+|----------|--------|------|------|
+| `AURAI_CONTEXT_HIGH_WATERMARK` | `0.85` | 0.5–1.0 | 上下文高水位线。输入 tokens 超过此比例时返回预警并主动压缩历史 |
+
+每次 `consult_aurai` / `report_progress` 响应中均包含 `token_usage` 字段，实时展示输入 tokens、使用率、是否触发预警。当超过高水位线时，会主动压缩历史为输出腾空间。本地 AI 可根据 `warning=true` 提示调用 `sync_context(operation='clear')` 清空历史。
+
+**上下文预算分配策略**: 优先保证 `AURAI_MAX_TOKENS` 的输出预算。输入过大时裁剪历史消息，不压缩输出。仅当基础消息（系统提示词 + 当前问题）本身就超过窗口时才缩减输出。
 
 ### 对话历史
 
 | 环境变量 | 默认值 | 范围 | 说明 |
 |----------|--------|------|------|
-| `AURAI_MAX_HISTORY` | `50` | 1–200 | 每个会话在本地最多保留多少条历史记录（超出触发摘要压缩或丢弃） |
+| `AURAI_MAX_HISTORY` | `50` | 1–200 | 每个会话在本地最多保留多少条历史记录 |
 | `AURAI_PROMPT_HISTORY_TURNS` | `10` | 1–50 | 每次发送给远程顾问时附带最近多少轮原始对话（摘要不受此限制） |
 | `AURAI_ENABLE_PERSISTENCE` | `true` | bool | 是否将历史保存到磁盘。关闭后重启 Claude Code 历史丢失 |
 | `AURAI_HISTORY_PATH` | `~/.mcp-aurai/history.json` | — | 历史文件存储路径 |
 | `AURAI_HISTORY_LOCK_TIMEOUT` | `10` | 1–120s | 跨进程文件锁等待超时 |
-| `AURAI_ENABLE_HISTORY_SUMMARY` | `true` | bool | 是否自动将旧历史压缩为摘要 |
-| `AURAI_HISTORY_SUMMARY_TRIGGER` | `8` | 2–100 | 原始记录超过此数量时触发摘要压缩 |
-| `AURAI_HISTORY_SUMMARY_KEEP_RECENT` | `3` | 1–20 | 摘要压缩后保留最近 N 轮原始对话 |
+| `AURAI_ENABLE_HISTORY_SUMMARY` | `true` | bool | 是否启用历史摘要。仅在接近 max_history（80%）时触发，保留 60% 原始记录 |
 
 **历史机制说明**:
 
-- `AURAI_MAX_HISTORY`（50 条）是本地存储上限，存在磁盘上
-- `AURAI_PROMPT_HISTORY_TURNS`（10 轮）是每次发给顾问的原始对话数量
-- 更早的历史会被摘要机制压缩成纪要，顾问仍能看到上下文脉络
+- `AURAI_MAX_HISTORY`（50 条）是本地存储上限——现代 200K 上下文下纯对话远填不满，真正的瓶颈是 `sync_context` 上传的大文件
+- 摘要不再按固定条数触发，而是在接近 max_history 时（40/50 条）才启动
+- Token 水位线预警（`AURAI_CONTEXT_HIGH_WATERMARK`）是实时防线，在每次请求前检查
 - 不同 `session_id` 的历史互相隔离
 
 ### 进程管理

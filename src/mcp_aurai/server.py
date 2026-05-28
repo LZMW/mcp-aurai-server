@@ -427,7 +427,7 @@ def _build_history_summary_entry(entries: list[dict[str, Any]]) -> dict[str, Any
 
 
 def _maybe_compact_history(session_id: str | None):
-    """在历史记录变长时，自动把较早轮次压缩成摘要。"""
+    """接近 max_history 上限时，把最早轮次压缩成摘要，避免旧记录被直接丢弃。"""
     if not server_config.enable_history_summary:
         return
 
@@ -438,34 +438,33 @@ def _maybe_compact_history(session_id: str | None):
         if entry.get("type") != SUMMARY_ENTRY_TYPE
     ]
 
-    summary_slot_count = 1
-    available_raw_slots = max(server_config.max_history - summary_slot_count, 0)
-    keep_recent = min(server_config.history_summary_keep_recent, available_raw_slots)
-    trigger_threshold = max(server_config.history_summary_trigger_entries, keep_recent + 1)
-
-    if len(raw_indexes) <= trigger_threshold:
+    # 仅在接近上限时触发 —— 保留 80% 空间给原始记录
+    trigger_at = int(server_config.max_history * 0.8)
+    if len(raw_indexes) < trigger_at:
         return
 
-    keep_indexes = set(raw_indexes[-keep_recent:]) if keep_recent else set()
+    # 保留最近 60% 的原始记录，其余压缩
+    keep_count = int(server_config.max_history * 0.6)
+    keep_indexes = set(raw_indexes[-keep_count:])
 
+    # 确保最近一次 sync_context 不被压掉
     latest_sync_index = None
     for index in range(len(history) - 1, -1, -1):
         if history[index].get("type") == "sync_context":
             latest_sync_index = index
             break
-
-    if latest_sync_index is not None and available_raw_slots > 0 and latest_sync_index not in keep_indexes:
-        if len(keep_indexes) >= available_raw_slots:
-            keep_indexes.remove(min(keep_indexes))
+    if latest_sync_index is not None and latest_sync_index not in keep_indexes:
         keep_indexes.add(latest_sync_index)
 
     summary_source_indexes = [
         index for index in range(len(history))
         if index not in keep_indexes
     ]
+    if not summary_source_indexes:
+        return
+
     entries_to_summarize = [history[index] for index in summary_source_indexes]
     summary_entry = _build_history_summary_entry(entries_to_summarize)
-
     if not summary_entry:
         return
 
@@ -476,8 +475,10 @@ def _maybe_compact_history(session_id: str | None):
 
     history[:] = new_history
     logger.info(
-        "会话 %r 的较早历史已摘要化：压缩 %s 条，保留 %s 条原始记录",
+        "会话 %r: 原始记录 %s 条接近上限 %s，已压缩 %s 条为摘要，保留 %s 条原始",
         normalized,
+        len(raw_indexes),
+        server_config.max_history,
         len(entries_to_summarize),
         len(new_history) - 1,
     )
