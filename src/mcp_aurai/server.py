@@ -693,7 +693,13 @@ async def consult_aurai(
     3. 如返回 status='need_info' → 按 questions_to_answer 搜集信息 → 再次调用，填入 answers_to_questions
     4. 如返回 status='success' → 按 action_items 执行 → 用 report_progress 汇报结果
 
-    is_new_question=true 会清空当前会话的全部历史。resolved=true 的对话结束后自动清空，无需手动设置。
+    stop_reason 表示对话终态原因:
+    - "resolved" → 问题已解决，历史已自动清空，可开始新问题
+    - "advisor_gave_up" → 顾问认为无法解决，需人工介入
+    - "max_iterations" → 达到轮数上限（默认 50 轮），历史已自动清空
+    - null → 对话尚未结束，继续迭代
+
+    is_new_question=true 会清空当前会话的全部历史。
     """
     _mark_process_activity("consult_aurai")
     config = get_aurai_config()
@@ -724,6 +730,7 @@ async def consult_aurai(
         _clear_history(normalized_session_id, f"达到 max_iterations={config.max_iterations}", log_prefix="[超限]")
         return {
             "status": "error",
+            "stop_reason": "max_iterations",
             "analysis": f"已达到最大迭代次数 ({config.max_iterations})",
             "guidance": "上级顾问在限定轮数内无法解决此问题，建议人工介入",
             "action_items": ["请人工审查当前状态"],
@@ -775,6 +782,7 @@ async def consult_aurai(
         logger.info(f"上级顾问要求补充信息，问题数: {len(response.get('questions', []))}")
         return {
             "status": "need_info",
+            "stop_reason": None,
             "message": "[提示] 上级顾问认为信息不足，请回答以下问题：",
             "questions_to_answer": response.get("questions", []),
             "instruction": "请搜集信息，再次调用 consult_aurai，并将答案填入 'answers_to_questions' 字段。",
@@ -795,6 +803,11 @@ async def consult_aurai(
 
         return {
             "status": "success",
+            "stop_reason": (
+                "resolved" if response.get("resolved")
+                else "advisor_gave_up" if response.get("requires_human_intervention")
+                else None
+            ),
             "analysis": response.get("analysis"),
             "guidance": response.get("guidance"),
             "action_items": response.get("action_items", []),
@@ -811,6 +824,7 @@ async def consult_aurai(
     logger.warning("上级顾问返回未知状态: %s，将原始响应透传", response.get("status"))
     return {
         "status": "error",
+        "stop_reason": "unexpected_status",
         "analysis": response.get("analysis", ""),
         "guidance": response.get("guidance", f"上级顾问返回未知状态: {response.get('status')}"),
         "action_items": response.get("action_items", []),
@@ -1020,6 +1034,7 @@ async def report_progress(
         logger.warning("会话 %s 达到最大迭代次数 %s，自动清空历史", normalized_session_id, config.max_iterations)
         _clear_history(normalized_session_id, f"达到 max_iterations={config.max_iterations}", log_prefix="[超限]")
         return {
+            "stop_reason": "max_iterations",
             "analysis": f"已达到最大迭代次数 ({config.max_iterations})",
             "guidance": "上级顾问在限定轮数内无法解决此问题，建议人工介入",
             "action_items": ["请人工审查当前状态"],
@@ -1065,6 +1080,11 @@ async def report_progress(
 
     logger.info(f"report_progress完成，resolved: {response.get('resolved', False)}")
     response["token_usage"] = token_usage
+    response["stop_reason"] = (
+        "resolved" if response.get("resolved")
+        else "advisor_gave_up" if response.get("requires_human_intervention")
+        else None
+    )
     return response
 
 
