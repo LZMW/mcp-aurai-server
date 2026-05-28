@@ -179,19 +179,6 @@ class AuraiClient:
 
         return groups
 
-    def _build_messages_from_history(
-        self,
-        conversation_history: list[dict] | None,
-    ) -> list[dict[str, str]]:
-        """将对话历史转换为平铺的 messages 列表。"""
-        groups = self._build_message_groups_from_history(conversation_history)
-
-        messages: list[dict[str, str]] = []
-        for group in groups:
-            messages.extend(group["messages"])
-
-        return messages
-
     def _truncate_messages_to_budget(
         self,
         messages: list[dict[str, str]],
@@ -311,7 +298,7 @@ class AuraiClient:
 
         final_messages = [*base_messages, *selected_history_messages, current_user_message]
         prompt_tokens = self._estimate_messages_tokens(final_messages)
-        watermark_hit = prompt_tokens >= self.config.context_window * self.config.context_high_watermark
+        watermark_hit = prompt_tokens >= input_budget * self.config.context_high_watermark
 
         if watermark_hit:
             # 超过高水位线：再压一轮历史，给输出腾空间

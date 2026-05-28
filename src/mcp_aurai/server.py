@@ -1034,6 +1034,7 @@ async def report_progress(
         logger.warning("会话 %s 达到最大迭代次数 %s，自动清空历史", normalized_session_id, config.max_iterations)
         _clear_history(normalized_session_id, f"达到 max_iterations={config.max_iterations}", log_prefix="[超限]")
         return {
+            "status": "error",
             "stop_reason": "max_iterations",
             "analysis": f"已达到最大迭代次数 ({config.max_iterations})",
             "guidance": "上级顾问在限定轮数内无法解决此问题，建议人工介入",
@@ -1064,14 +1065,14 @@ async def report_progress(
         conversation_history=_get_history(normalized_session_id)
     )
 
-    # 记录到历史
+    # 记录到历史 — 存副本避免后续修改污染持久化数据
     _add_to_history({
         "type": "progress",
         "actions_taken": actions_taken,
         "result": result,
         "new_error": new_error,
         "feedback": feedback,
-        "response": response,
+        "response": dict(response),
     }, normalized_session_id)
 
     # 检查问题是否已解决，若解决则清空对话历史
@@ -1079,13 +1080,18 @@ async def report_progress(
         _clear_history(normalized_session_id, "report_progress 返回 resolved=true", log_prefix="[完成]")
 
     logger.info(f"report_progress完成，resolved: {response.get('resolved', False)}")
-    response["token_usage"] = token_usage
-    response["stop_reason"] = (
+    stop_reason = (
         "resolved" if response.get("resolved")
         else "advisor_gave_up" if response.get("requires_human_intervention")
         else None
     )
-    return response
+
+    # 构建返回字典（不污染历史记录中的原始 response）
+    return {
+        **response,
+        "token_usage": token_usage,
+        "stop_reason": stop_reason,
+    }
 
 
 @mcp.tool()

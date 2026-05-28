@@ -70,7 +70,7 @@ def test_sync_context_history_messages_include_project_info():
     client = AuraiClient.__new__(AuraiClient)
     client.config = SimpleNamespace(max_message_tokens=5000)
 
-    messages = client._build_messages_from_history([
+    groups = client._build_message_groups_from_history([
         {
             "type": "sync_context",
             "project_info": {
@@ -81,7 +81,8 @@ def test_sync_context_history_messages_include_project_info():
         }
     ])
 
-    assert len(messages) == 1
+    assert len(groups) == 1
+    messages = groups[0]["messages"]
     assert "已同步项目背景" in messages[0]["content"]
     assert "示例项目" in messages[0]["content"]
 
@@ -92,14 +93,15 @@ def test_summary_history_messages_are_included():
     client = AuraiClient.__new__(AuraiClient)
     client.config = SimpleNamespace(max_message_tokens=5000)
 
-    messages = client._build_messages_from_history([
+    groups = client._build_message_groups_from_history([
         {
             "type": "summary",
             "summary_text": "这里是旧历史纪要",
         }
     ])
 
-    assert len(messages) == 1
+    assert len(groups) == 1
+    messages = groups[0]["messages"]
     assert "历史摘要" in messages[0]["content"]
     assert "旧历史纪要" in messages[0]["content"]
 
