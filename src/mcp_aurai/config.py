@@ -134,13 +134,16 @@ class AuraiConfig(BaseModel):
         if not v.startswith(('http://', 'https://')):
             raise ValueError("Base URL 必须以 http:// 或 https:// 开头")
 
-        # 简单的URL格式检查
+        # URL格式检查：域名、IP、localhost、或单标签主机名（如 Docker 服务名）
         url_pattern = re.compile(
-            r'^https?://'  # http:// or https://
-            r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain
-            r'localhost|'  # localhost
-            r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # IP
-            r'(?::\d+)?'  # optional port
+            r'^https?://'
+            r'(?:'
+            r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?)|'  # FQDN
+            r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*)|'  # 主机名（含单标签）
+            r'localhost|'
+            r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+            r')'
+            r'(?::\d+)?'
             r'(?:/?|[/?]\S+)$', re.IGNORECASE
         )
 
@@ -213,6 +216,14 @@ class ServerConfig(BaseModel):
         ge=2,
         le=100,
         description="触发历史摘要的原始记录数阈值"
+    )
+
+    # 发送给上级顾问的最近对话轮数
+    prompt_history_turns: int = Field(
+        default_factory=lambda: int(os.getenv("AURAI_PROMPT_HISTORY_TURNS", "10")),
+        ge=1,
+        le=50,
+        description="发送给上级顾问的最近对话轮数（摘要仍会作为前置上下文保留）"
     )
 
     # stdio 服务空闲自动退出时间（秒）

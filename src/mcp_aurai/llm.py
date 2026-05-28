@@ -2,9 +2,8 @@
 
 import json
 import logging
-from typing import Literal
-
 from .config import get_aurai_config
+from .utils import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -46,34 +45,6 @@ class AuraiClient:
         )
         logger.info(f"OpenAI兼容客户端已初始化，Base URL: {self.config.base_url}，模型: {self.config.model}，超时: {HTTP_TIMEOUT}s")
 
-    def _estimate_tokens(self, text: str) -> int:
-        """
-        估算文本的token数量
-
-        使用简单的启发式方法：英文约4字符/token，中文约1.5字符/token
-
-        Args:
-            text: 要估算的文本
-
-        Returns:
-            估算的token数量
-        """
-        if not text:
-            return 0
-
-        # 统计中文字符
-        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-
-        # 统计非中文字符
-        other_chars = len(text) - chinese_chars
-
-        # 估算token数
-        # 中文：约1.5字符/token
-        # 英文/其他：约4字符/token
-        tokens = int(chinese_chars / 1.5 + other_chars / 4)
-
-        return tokens
-
     def _split_file_content(self, file_path: str, content: str) -> list[str]:
         """
         拆分大文件内容为多个片段，确保每个片段不超过 max_message_tokens
@@ -88,7 +59,7 @@ class AuraiClient:
         max_tokens = self.config.max_message_tokens
 
         # 估算内容 token 数
-        content_tokens = self._estimate_tokens(content)
+        content_tokens = estimate_tokens(content)
 
         # 如果内容不大，直接返回
         if content_tokens <= max_tokens:
@@ -105,20 +76,16 @@ class AuraiClient:
         for i in range(0, len(content), target_chars):
             chunk = content[i:i + target_chars]
             chunks.append(chunk)
-            logger.debug(f"  片段 {len(chunks)}: 约 {self._estimate_tokens(chunk)} tokens")
+            logger.debug(f"  片段 {len(chunks)}: 约 {estimate_tokens(chunk)} tokens")
 
         logger.info(f"文件 {file_path} 已拆分为 {len(chunks)} 个片段")
         return chunks
-
-    def _serialize_for_message(self, value) -> str:
-        """将结构化数据转换为便于发送给模型的文本。"""
-        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
     def _estimate_message_tokens(self, message: dict[str, str]) -> int:
         """估算单条消息的 token 数量，额外计入角色与协议开销。"""
         content = message.get("content", "")
         role = message.get("role", "")
-        return self._estimate_tokens(content) + self._estimate_tokens(role) + 6
+        return estimate_tokens(content) + estimate_tokens(role) + 6
 
     def _estimate_messages_tokens(self, messages: list[dict[str, str]]) -> int:
         """估算多条消息的总 token 数量。"""
@@ -156,7 +123,7 @@ class AuraiClient:
             elif turn.get("type") == "sync_context":
                 project_info = turn.get("project_info", {})
                 if project_info:
-                    project_info_text = self._serialize_for_message(project_info)
+                    project_info_text = json.dumps(project_info, ensure_ascii=False, indent=2, default=str)
                     chunks = self._split_file_content("project_info.json", project_info_text)
 
                     for idx, chunk in enumerate(chunks):
@@ -318,59 +285,55 @@ class AuraiClient:
         current_user_message: dict[str, str],
     ) -> tuple[list[dict[str, str]], int, int]:
         """
-        将请求消息压进上下文窗口，并动态计算可用输出长度。
+        将请求消息压进上下文窗口。
+
+        优先保证输出预算 (max_tokens)，不满时才裁剪输入历史。
+        仅当基础消息本身超过窗口时才会降低输出上限。
 
         Returns:
             (最终消息列表, 估算输入 tokens, 实际输出上限)
         """
-        reserved_output_tokens = min(self.config.max_tokens, max(self.config.context_window, 1))
-        target_prompt_budget = max(self.config.context_window - reserved_output_tokens, 1)
-
         required_messages = [*base_messages, current_user_message]
         required_prompt_tokens = self._estimate_messages_tokens(required_messages)
-        remaining_history_budget = max(target_prompt_budget - required_prompt_tokens, 0)
+        output_budget = self.config.max_tokens
+        input_budget = max(self.config.context_window - output_budget, 1)
 
+        if required_prompt_tokens > input_budget:
+            # 基础消息本身就超过输入预算，只能牺牲输出
+            available_output = max(self.config.context_window - required_prompt_tokens, 1)
+            output_budget = min(self.config.max_tokens, available_output)
+            input_budget = max(self.config.context_window - output_budget, 1)
+
+        history_budget = max(input_budget - required_prompt_tokens, 0)
         selected_history_messages, trimmed = self._select_history_messages_within_budget(
             history_groups,
-            remaining_history_budget,
+            history_budget,
         )
 
         final_messages = [*base_messages, *selected_history_messages, current_user_message]
         prompt_tokens = self._estimate_messages_tokens(final_messages)
-        available_output_tokens = max(self.config.context_window - prompt_tokens, 1)
-        response_max_tokens = min(self.config.max_tokens, available_output_tokens)
 
         if trimmed:
             logger.warning(
-                "上下文窗口不足，已裁剪部分历史消息。输入约 %s tokens，窗口上限 %s，输出上限调整为 %s",
+                "上下文窗口不足，已裁剪部分历史消息以保障输出预算。输入约 %s tokens，输出上限 %s",
                 prompt_tokens,
-                self.config.context_window,
-                response_max_tokens,
-            )
-        elif response_max_tokens < self.config.max_tokens:
-            logger.info(
-                "为适配上下文窗口，输出上限已从 %s 调整为 %s",
-                self.config.max_tokens,
-                response_max_tokens,
+                output_budget,
             )
 
-        return final_messages, prompt_tokens, response_max_tokens
+        return final_messages, prompt_tokens, output_budget
 
     async def chat(
         self,
         user_message: str,
         system_prompt: str | None = None,
-        response_format: Literal["text", "json_object"] = "json_object",
         conversation_history: list[dict] | None = None,
     ) -> dict:
-        # 注意: response_format 参数保留以兼容旧调用，但实际始终使用 JSON Schema
         """
         发送聊天请求
 
         Args:
             user_message: 用户消息
             system_prompt: 系统提示词
-            response_format: 响应格式
             conversation_history: 对话历史（用于多轮对话）
 
         Returns:
@@ -438,10 +401,10 @@ class AuraiClient:
                     "requires_human_intervention": True,
                 }
 
-        except Exception as e:
-            logger.error(f"API请求失败: {e}")
+        except Exception:
+            logger.exception("API请求失败")
             return {
-                "analysis": f"请求失败: {str(e)}",
+                "analysis": "请求失败",
                 "guidance": "请检查API密钥、Base URL和网络连接",
                 "action_items": [],
                 "needs_another_iteration": False,
@@ -489,10 +452,15 @@ def get_models(
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        import httpx
+
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(HTTP_TIMEOUT, connect=DEFAULT_TIMEOUT)
+        )
+        client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
         models = client.models.list()
         return [model.id for model in models.data]
 
     except Exception as e:
-        logger.error(f"获取模型列表失败: {e}")
+        logger.error("获取模型列表失败: %s", e)
         raise

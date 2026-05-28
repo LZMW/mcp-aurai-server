@@ -59,15 +59,22 @@ def _is_parent_process_alive() -> bool:
     """检测父进程（Claude Code）是否仍在运行。
 
     在 Windows 上通过 OpenProcess + GetExitCodeProcess 检查父进程状态，
-    避免因权限不足或父进程为系统进程时误判。始终假设 '不确定时父进程存活'，
+    非 Windows 平台回退到 os.kill(ppid, 0)。始终假设 '不确定时父进程存活'，
     宁可保留孤儿实例也不意外杀正常服务。
     """
     ppid = os.getppid()
     if ppid == 0:
         return False
     if ppid == 1:
-        # Windows 上 ppid=1 通常意味着父进程已退出并被 system 进程接管
         return False
+
+    # 非 Windows：发送空信号检测进程是否存在
+    if sys.platform != "win32":
+        try:
+            os.kill(ppid, 0)
+            return True
+        except OSError:
+            return False
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
@@ -84,11 +91,12 @@ def _is_parent_process_alive() -> bool:
             return True
 
         kernel32.CloseHandle(handle)
-        if exit_code.value != STILL_ACTIVE:
-            logger.debug("父进程 %s 已退出（exit_code=%d）", ppid, exit_code.value)
-            return False
-        return True
-    except OSError:
+        if exit_code.value == STILL_ACTIVE:
+            return True
+        logger.debug("父进程 %s 已退出（exit_code=%d）", ppid, exit_code.value)
+        return False
+    except Exception:
+        logger.debug("父进程活性检查失败", exc_info=True)
         return True  # 无法检查 – 假设还活着
 
 
@@ -144,22 +152,24 @@ def _start_stdio_idle_watchdog():
             server_config.stdio_idle_check_interval_seconds,
         )
         while True:
-            time.sleep(server_config.stdio_idle_check_interval_seconds)
-            idle_seconds = _get_process_idle_seconds()
-            if _should_exit_for_stdio_idle():
-                if _is_parent_process_alive():
-                    logger.debug(
-                        "stdio 服务已空闲 %.1f 秒，但父进程仍存活，跳过自动退出",
-                        idle_seconds,
-                    )
-                    # 重置活动时间戳，避免下一轮检查立即触发
-                    _mark_process_activity("idle-watchdog-reset")
-                else:
-                    logger.warning(
-                        "stdio 服务已空闲 %.1f 秒且父进程已退出，进程将自动结束",
-                        idle_seconds,
-                    )
-                    os._exit(0)
+            try:
+                time.sleep(server_config.stdio_idle_check_interval_seconds)
+                idle_seconds = _get_process_idle_seconds()
+                if _should_exit_for_stdio_idle():
+                    if _is_parent_process_alive():
+                        logger.debug(
+                            "stdio 服务已空闲 %.1f 秒，但父进程仍存活，跳过自动退出",
+                            idle_seconds,
+                        )
+                        _mark_process_activity("idle-watchdog-reset")
+                    else:
+                        logger.warning(
+                            "stdio 服务已空闲 %.1f 秒且父进程已退出，进程将自动结束",
+                            idle_seconds,
+                        )
+                        os._exit(0)
+            except Exception:
+                logger.exception("watchdog 检查周期异常，将在下一周期重试")
 
     thread = threading.Thread(
         target=watchdog,
@@ -167,6 +177,22 @@ def _start_stdio_idle_watchdog():
         daemon=True,
     )
     thread.start()
+
+
+def _parse_json_param(value: Any, expect_type: type = dict) -> dict[str, Any] | list:
+    """将参数统一解析为期望类型 -- 支持 JSON 字符串。"""
+    if value is None:
+        return {} if expect_type is dict else []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, expect_type) else expect_type()
+        except json.JSONDecodeError as e:
+            logger.warning("JSON 解析失败: %s，使用空%s", e, expect_type.__name__)
+            return {} if expect_type is dict else []
+    if isinstance(value, expect_type):
+        return value
+    return {} if expect_type is dict else []
 
 
 def _normalize_session_id(session_id: str | None) -> str:
@@ -223,7 +249,6 @@ def _history_file_lock(session_id: str | None):
     while True:
         try:
             lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.write(lock_fd, f"{os.getpid()} {normalized}".encode("utf-8"))
             break
         except FileExistsError:
             if time.monotonic() >= deadline:
@@ -231,6 +256,17 @@ def _history_file_lock(session_id: str | None):
                     f"等待历史文件锁超时: {lock_file}（>{server_config.history_lock_timeout}秒）"
                 )
             time.sleep(HISTORY_LOCK_RETRY_INTERVAL)
+
+    try:
+        os.write(lock_fd, f"{os.getpid()} {normalized}".encode("utf-8"))
+    except Exception:
+        os.close(lock_fd)
+        lock_fd = None
+        try:
+            lock_file.unlink()
+        except OSError:
+            pass
+        raise
 
     try:
         yield
@@ -462,14 +498,14 @@ def _ensure_session_loaded(session_id: str | None):
 
 
 def _get_session_history(session_id: str | None) -> list[dict[str, Any]]:
-    """获取某个会话的完整历史。"""
+    """获取某个会话的完整历史（从内存，首次访问时从磁盘加载）。"""
     normalized = _normalize_session_id(session_id)
     _ensure_session_loaded(normalized)
     return _conversation_history.setdefault(normalized, [])
 
 
 def _get_history(session_id: str | None = None) -> list[dict[str, Any]]:
-    """获取某个会话的对话历史。"""
+    """获取某个会话最近的对话历史，截断至 max_history 条。"""
     history = _get_session_history(session_id)
     return history[-server_config.max_history:]
 
@@ -482,7 +518,8 @@ def _clear_history(
     """
     清空某个会话的对话历史，并在启用持久化时立即同步到文件。
 
-    这能避免只清空内存、不更新历史文件，导致服务重启后旧历史“复活”。
+    先写空文件再清内存，确保极端情况下不会出现"内存已空但磁盘未更新"
+    导致重启后旧历史复活。
 
     Args:
         session_id: 会话标识
@@ -495,10 +532,18 @@ def _clear_history(
     normalized = _normalize_session_id(session_id)
     history = _get_session_history(normalized)
     history_count = len(history)
-    history.clear()
 
     if server_config.enable_persistence:
-        _save_history_to_file(normalized)
+        history_file = _get_history_file_for_session(normalized)
+        try:
+            with _history_file_lock(normalized):
+                _write_history_file_atomic(history_file, [])
+        except Exception:
+            logger.exception("清空历史文件失败: %s，内存历史仍然清空", history_file)
+        else:
+            logger.debug("已写入空历史文件: %s", history_file)
+
+    history.clear()
 
     logger.info(f"{log_prefix} 会话 {normalized!r} 的对话历史已清空（清除 {history_count} 条记录）")
     if reason:
@@ -517,7 +562,7 @@ def _add_to_history(entry: dict[str, Any], session_id: str | None = None):
 
     # 最终兜底，避免极端配置下历史条数仍超限
     while len(history) > server_config.max_history:
-        if history and history[0].get("type") == SUMMARY_ENTRY_TYPE and len(history) > 1:
+        if history[0].get("type") == SUMMARY_ENTRY_TYPE:
             history.pop(1)
         else:
             history.pop(0)
@@ -574,14 +619,14 @@ def _load_history_from_file(session_id: str | None = None) -> list[dict[str, Any
         logger.info(f"从文件加载了 {len(history)} 条历史记录，会话: {normalized!r}")
         return history
 
-    except json.JSONDecodeError as e:
-        logger.error(f"历史文件JSON解析失败: {e}")
+    except json.JSONDecodeError:
+        logger.exception("历史文件 JSON 解析失败: %s", history_file)
         return []
-    except TimeoutError as e:
-        logger.error(f"获取历史文件锁失败: {e}")
+    except TimeoutError:
+        logger.error("获取历史文件锁超时: %s", history_file)
         return []
-    except Exception as e:
-        logger.error(f"加载历史文件失败: {e}")
+    except OSError:
+        logger.exception("读取历史文件 I/O 错误: %s", history_file)
         return []
 
 
@@ -605,10 +650,10 @@ def _save_history_to_file(session_id: str | None = None):
 
         logger.debug(f"已保存会话 {normalized!r} 的 {len(history)} 条历史记录到文件")
 
-    except TimeoutError as e:
-        logger.warning(f"保存历史文件时获取锁失败: {e},继续使用内存模式")
-    except Exception as e:
-        logger.warning(f"保存历史文件失败: {e},继续使用内存模式")
+    except TimeoutError:
+        logger.error("保存历史文件时获取锁超时: %s", history_file)
+    except OSError:
+        logger.exception("保存历史文件 I/O 错误: %s", history_file)
 
 
 @mcp.tool()
@@ -661,43 +706,18 @@ async def consult_aurai(
         normalized_session_id,
     )
 
-    # [新问题] 处理新问题：两种方式触发清空历史
-    # 方式1：明确标注 is_new_question=true
-    # 方式2：自动检测（上一次对话已解决）
-    should_clear_history = False
-    clear_reason = ""
-
+    # 清空历史: is_new_question 或者上一轮已 resolved
     if is_new_question:
-        # 明确标注新问题
-        should_clear_history = True
-        clear_reason = "下级AI明确标注为新问题"
-    elif session_history:
-        # 自动检测：检查上一次对话是否已解决
-        last_entry = session_history[-1]
-        last_response = last_entry.get("response", {})
-
-        if last_response.get("resolved", False):
-            should_clear_history = True
-            clear_reason = "上一次对话已解决（自动检测）"
-
-    # 执行清空操作
-    if should_clear_history:
-        _clear_history(normalized_session_id, clear_reason, log_prefix="[新问题]")
-        logger.info(f"   新问题: {problem_type} - {error_message[:100]}...")
+        _clear_history(normalized_session_id, "下级AI明确标注为新问题", log_prefix="[新问题]")
+        logger.info("   新问题: %s - %.100s...", problem_type, error_message)
+        session_history = _get_session_history(normalized_session_id)
+    elif session_history and session_history[-1].get("response", {}).get("resolved", False):
+        _clear_history(normalized_session_id, "上一次对话已解决（自动检测）", log_prefix="[新问题]")
+        logger.info("   新问题(自动): %s - %.100s...", problem_type, error_message)
         session_history = _get_session_history(normalized_session_id)
 
     # 解析 context 参数（支持 JSON 字符串或字典）
-    parsed_context: dict[str, Any] = {}
-    if context:
-        if isinstance(context, str):
-            try:
-                parsed_context = json.loads(context)
-                logger.debug("已解析 JSON 格式的 context")
-            except json.JSONDecodeError as e:
-                logger.warning(f"context JSON 解析失败: {e}，使用空字典")
-                parsed_context = {}
-        elif isinstance(context, dict):
-            parsed_context = context
+    parsed_context = _parse_json_param(context, dict)
 
     # 构建提示词（如果有对反问的回答，加入上下文）
     current_context = parsed_context or {}
@@ -712,6 +732,7 @@ async def consult_aurai(
         attempts_made=attempts_made,
         iteration=len(session_history),
         conversation_history=_get_history(normalized_session_id),
+        history_turns=server_config.prompt_history_turns,
     )
 
     # 调用上级AI，传递对话历史
@@ -732,26 +753,23 @@ async def consult_aurai(
 
     # 根据上级顾问的响应状态返回不同格式
     if response.get("status") == "aligning":
-        # 模式 A: 信息不足，需要补充
         logger.info(f"上级顾问要求补充信息，问题数: {len(response.get('questions', []))}")
         return {
             "status": "need_info",
             "message": "[提示] 上级顾问认为信息不足，请回答以下问题：",
             "questions_to_answer": response.get("questions", []),
             "instruction": "请搜集信息，再次调用 consult_aurai，并将答案填入 'answers_to_questions' 字段。",
-            # ⭐ 相关工具提示
             "related_tools_hint": {
                 "sync_context": {
                     "description": "如果需要上传文档（.md/.txt）来补充上下文信息",
-                    "example": "sync_context(operation='full_sync', files=['path/to/doc.md'])"
+                    "example": "sync_context(operation='sync', files=['path/to/doc.md'])"
                 }
             }
         }
-    else:
-        # 模式 B: 信息充足，提供指导
+
+    if response.get("status") == "guiding":
         logger.info(f"上级顾问提供指导，resolved: {response.get('resolved', False)}")
 
-        # 检查问题是否已解决，若解决则清空对话历史
         if response.get("resolved", False):
             _clear_history(normalized_session_id, "上级顾问返回 resolved=true", log_prefix="[完成]")
 
@@ -768,11 +786,25 @@ async def consult_aurai(
             "hint": "[提示] 如需咨询新问题，下次调用时设置 is_new_question=true。这将清空之前的所有对话历史（包括之前的问题和上级AI的指导），但当前这条新问题会正常处理并保留在新的对话中",
         }
 
+    # LLM 返回了意外的 status 值
+    logger.warning("上级顾问返回未知状态: %s，将原始响应透传", response.get("status"))
+    return {
+        "status": "error",
+        "analysis": response.get("analysis", ""),
+        "guidance": response.get("guidance", f"上级顾问返回未知状态: {response.get('status')}"),
+        "action_items": response.get("action_items", []),
+        "code_changes": response.get("code_changes", []),
+        "verification": response.get("verification"),
+        "needs_another_iteration": False,
+        "resolved": False,
+        "requires_human_intervention": True,
+    }
+
 
 @mcp.tool()
 async def sync_context(
     operation: str = Field(
-        description="full_sync（首次/重建完整上下文）/ incremental（追加文件）/ clear（清空历史）"
+        description="操作类型: sync（同步文件追加到上下文）/ clear（清空当前会话历史）"
     ),
     files: Any = Field(
         default=None,
@@ -789,43 +821,21 @@ async def sync_context(
 ) -> dict[str, Any]:
     """上传文件内容和项目背景给远程顾问。顾问无法直接读你的文件系统，必须先 sync 它才能看到。
 
-    何时调用:
-    - 首次咨询前: sync_context(operation='full_sync', files=['关键代码文件', ...], project_info={...})
-    - 顾问要求看更多代码: sync_context(operation='incremental', files=['新文件', ...])
-    - 代码有重大改动后: 同上
+    首次同步和后续追加文件使用相同的 operation='sync'，文件内容会累积到当前会话中。
+    如需重新开始，先调用 sync_context(operation='clear') 清空历史。
 
-    支持的文件类型: .py .js .ts .tsx .java .go .rs .cpp .c .json .yaml .yml .toml .md .txt .ini .cfg .env 等文本文件。
-    图片、压缩包、可执行文件等二进制内容会被自动跳过。
+    支持的文件类型: 所有文本文件（.py .js .ts .go .json .yaml .md .txt 等）。
+    二进制文件（图片、压缩包、可执行文件）会被自动跳过。
     """
     _mark_process_activity("sync_context")
     normalized_session_id = _normalize_session_id(session_id)
     logger.info(f"收到sync_context请求，操作: {operation}，会话: {normalized_session_id}")
 
     # 解析 files 参数（支持 JSON 字符串或列表）
-    parsed_files: list[str] = []
-    if files:
-        if isinstance(files, str):
-            try:
-                parsed_files = json.loads(files)
-                logger.debug("已解析 JSON 格式的 files")
-            except json.JSONDecodeError as e:
-                logger.warning(f"files JSON 解析失败: {e}，使用空列表")
-                parsed_files = []
-        elif isinstance(files, list):
-            parsed_files = files
+    parsed_files: list[str] = _parse_json_param(files, list)
 
     # 解析 project_info 参数（支持 JSON 字符串或字典）
-    parsed_project_info: dict[str, Any] = {}
-    if project_info:
-        if isinstance(project_info, str):
-            try:
-                parsed_project_info = json.loads(project_info)
-                logger.debug("已解析 JSON 格式的 project_info")
-            except json.JSONDecodeError as e:
-                logger.warning(f"project_info JSON 解析失败: {e}，使用空字典")
-                parsed_project_info = {}
-        elif isinstance(project_info, dict):
-            parsed_project_info = project_info
+    parsed_project_info: dict[str, Any] = _parse_json_param(project_info, dict)
 
     if operation == "clear":
         # 清空对话历史
@@ -840,7 +850,7 @@ async def sync_context(
             "history_count": 0,
         }
 
-    elif operation in ("full_sync", "incremental"):
+    elif operation == "sync" or operation in ("full_sync", "incremental"):
         # 优化 project_info：将大内容转换为临时文件
         optimized_project_info, temp_files, large_contents_map = optimize_context_for_sync(
             parsed_project_info,
@@ -1005,6 +1015,7 @@ async def report_progress(
         new_error=new_error,
         feedback=feedback,
         conversation_history=_get_history(normalized_session_id),
+        history_turns=server_config.prompt_history_turns,
     )
 
     # 调用上级AI，传递对话历史

@@ -8,17 +8,16 @@ def _serialize_context(value: Any) -> str:
     """将上下文值序列化为适合放入提示词的文本。"""
     if isinstance(value, str):
         return value
-
     try:
         return json.dumps(value, ensure_ascii=False, indent=2, default=str)
-    except TypeError:
+    except (TypeError, ValueError):
         return str(value)
 
 
-def _format_history_for_prompt(conversation_history: list[dict[str, Any]] | None, max_turns: int = 5) -> str:
+def _format_history_for_prompt(conversation_history: list[dict[str, Any]] | None, max_turns: int = 10) -> str:
     """将对话历史格式化为提示词可用的文本。
 
-    按时间倒序取最近 max_turns 条非 summary 记录，summary 条目会作为前置上下文保留。
+    保留最近 max_turns 条非摘要记录（时间正序），摘要条目作为前置上下文插入。
     """
     if not conversation_history:
         return ""
@@ -106,6 +105,7 @@ def build_consult_prompt(
     attempts_made: str | None = None,
     iteration: int = 0,
     conversation_history: list[dict[str, str]] | None = None,
+    history_turns: int = 10,
 ) -> str:
     """构建请求上级AI指导的提示词。格式说明由 SYSTEM_PROMPT 统一提供。"""
     context = context or {}
@@ -136,7 +136,7 @@ def build_consult_prompt(
             f"```json\n{_serialize_context(extra_context)}\n```"
         )
 
-    history_desc = _format_history_for_prompt(conversation_history)
+    history_desc = _format_history_for_prompt(conversation_history, max_turns=history_turns)
 
     prompt = f"""# 问题信息
 
@@ -165,9 +165,10 @@ def build_progress_prompt(
     new_error: str | None = None,
     feedback: str | None = None,
     conversation_history: list[dict[str, str]] | None = None,
+    history_turns: int = 10,
 ) -> str:
     """构建报告进度的提示词。格式说明由 SYSTEM_PROMPT 统一提供。"""
-    history_desc = _format_history_for_prompt(conversation_history)
+    history_desc = _format_history_for_prompt(conversation_history, max_turns=history_turns)
 
     prompt = f"""# 进度报告
 

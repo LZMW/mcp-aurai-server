@@ -72,7 +72,7 @@ async def test_sync_context_clear_persists_empty_history(server_module, tmp_path
         "response": {"resolved": False},
     })
 
-    result = await server.sync_context(
+    result = await server.sync_context.fn(
         operation="clear",
         files=None,
         project_info=None,
@@ -92,7 +92,7 @@ async def test_sync_context_auto_converts_code_file_to_text(server_module, tmp_p
     code_file = tmp_path / "main.py"
     code_file.write_text("print('hello')\n", encoding="utf-8")
 
-    result = await server.sync_context(
+    result = await server.sync_context.fn(
         operation="incremental",
         files=[str(code_file)],
         project_info=None,
@@ -123,7 +123,7 @@ async def test_sync_context_skips_binary_file_but_keeps_text_file(server_module,
     binary_file = tmp_path / "image.png"
     binary_file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
 
-    result = await server.sync_context(
+    result = await server.sync_context.fn(
         operation="incremental",
         files=[str(code_file), str(binary_file)],
         project_info=None,
@@ -145,7 +145,7 @@ async def test_sync_context_returns_error_when_all_files_are_binary(server_modul
     binary_file = tmp_path / "archive.zip"
     binary_file.write_bytes(b"PK\x03\x04\x00\x00\x00\x00")
 
-    result = await server.sync_context(
+    result = await server.sync_context.fn(
         operation="incremental",
         files=[str(binary_file)],
         project_info=None,
@@ -179,7 +179,7 @@ async def test_consult_resolved_clears_persisted_history(server_module, tmp_path
         server,
         "get_aurai_client",
         lambda: FakeClient({
-            "status": "success",
+            "status": "guiding",
             "analysis": "已解决",
             "guidance": "无需继续处理",
             "action_items": [],
@@ -187,7 +187,7 @@ async def test_consult_resolved_clears_persisted_history(server_module, tmp_path
         }),
     )
 
-    result = await server.consult_aurai(
+    result = await server.consult_aurai.fn(
         problem_type="other",
         error_message="新问题",
         code_snippet=None,
@@ -233,7 +233,7 @@ async def test_report_progress_resolved_clears_persisted_history(server_module, 
         }),
     )
 
-    result = await server.report_progress(
+    result = await server.report_progress.fn(
         actions_taken="执行修复",
         result="success",
         new_error=None,
@@ -269,7 +269,7 @@ async def test_sync_context_clear_only_affects_target_session(server_module, tmp
     alpha_history_path = server._get_history_file_for_session("alpha")
     beta_history_path = server._get_history_file_for_session("beta")
 
-    result = await server.sync_context(
+    result = await server.sync_context.fn(
         operation="clear",
         files=None,
         project_info=None,
@@ -312,7 +312,7 @@ async def test_consult_uses_only_target_session_history(server_module, tmp_path,
         server,
         "get_aurai_client",
         lambda: FakeClient({
-            "status": "success",
+            "status": "guiding",
             "analysis": "继续",
             "guidance": "继续",
             "action_items": [],
@@ -320,7 +320,7 @@ async def test_consult_uses_only_target_session_history(server_module, tmp_path,
         }, recorder=recorder),
     )
 
-    await server.consult_aurai(
+    await server.consult_aurai.fn(
         problem_type="other",
         error_message="新问题",
         code_snippet=None,

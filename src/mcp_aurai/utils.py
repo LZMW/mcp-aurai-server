@@ -102,21 +102,6 @@ def save_content_to_file(content: str, file_type: str = "md") -> Path:
     return file_path
 
 
-def cleanup_temp_files():
-    """
-    清理所有临时文件
-    """
-    if not TEMP_DIR.exists():
-        return
-
-    try:
-        for file in TEMP_DIR.glob("context_*.*"):
-            file.unlink()
-        logger.info(f"已清理临时文件目录: {TEMP_DIR}")
-    except Exception as e:
-        logger.warning(f"清理临时文件失败: {e}")
-
-
 def _looks_like_binary_content(data: bytes) -> bool:
     """粗略判断文件内容是否像二进制。"""
     if not data:

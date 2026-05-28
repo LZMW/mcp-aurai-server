@@ -1,319 +1,201 @@
-# 上级顾问 MCP（Aurai Advisor）
+# Aurai Advisor MCP
 
-> 让本地 AI 在遇到复杂编程问题时，向远程大模型继续请教的 MCP 服务。
+让本地 AI（Claude Code）在遇到复杂编程问题时，向远程大模型继续请教的 MCP 服务。
 
-当前仓库对应的是“可长期使用”的版本，已经补齐了这些关键能力：
+**工作原理**: 本地 AI 通过 `sync_context` 上传代码文件 → `consult_aurai` 提交问题 → 远程顾问返回分析 + 可执行步骤 → 本地 AI 用 `report_progress` 汇报进展 → 循环直到解决。
 
-- 多轮咨询与进度回报
-- `sync_context` 文件同步
-- 代码/配置文件自动转文本上传
-- 会话隔离（`session_id`）
-- 历史持久化、文件锁、原子写入
-- 历史自动摘要
-- 上下文窗口裁剪
+**关键约束**: 远程顾问**无法直接访问你的文件系统**。它只能看到你通过 `sync_context` 上传的文件内容和 `consult_aurai` 描述的信息。
 
 ---
 
-## 本次更新了什么
+## 安装
 
-这次主线更新，重点补的是这些：
+### 1. 环境要求
 
-- 修复历史清空后重启又“复活”的问题
-- 增加 `session_id` 会话隔离，避免不同问题串上下文
-- 接通 `AURAI_TEMPERATURE`、`AURAI_MAX_ITERATIONS`、`AURAI_LOG_LEVEL` 等真实可用配置
-- 让 `project_info`、补充回答等上下文真正发给上级顾问
-- 增加历史文件锁和原子写入，降低并发写坏历史文件的风险
-- 增加历史自动摘要，长会话不会越来越臃肿
-- 增加上下文窗口裁剪，`AURAI_CONTEXT_WINDOW` 现在会真正生效
-- `sync_context` 支持自动把代码/配置等文本文件转成可发送文本，不再要求手动复制成 `.txt`
-- 重写 README、安装指南和用户手册，安装步骤现在放在更靠前的位置
+- Python 3.10+
+- Claude Code（或其他支持 MCP stdio 的客户端）
 
-如果你是第一次接触这个仓库，最重要的两点是：
-
-1. 先看下面的“安装说明”
-2. 代码文件现在可以直接传给 `sync_context`
-
----
-
-## 适合做什么
-
-这个 MCP 适合放在 Claude Code 或其他支持 stdio 方式的 MCP 客户端里使用。
-
-典型场景：
-
-- 本地 AI 已经尝试过，但问题还是没解开
-- 需要把报错、代码、文档、配置一起交给“上级顾问”
-- 希望让复杂排查变成“提问 -> 执行 -> 汇报 -> 下一步”的多轮流程
-
----
-
-## 功能概览
-
-- `consult_aurai`
-  主要咨询工具。提交问题、代码片段、上下文、已尝试方案，获取上级顾问的分析和下一步建议。
-
-- `sync_context`
-  同步代码和文档上下文。
-  现在不只支持 `.txt/.md`，还会自动把 `.py/.js/.ts/.json/.yaml/.toml/.ini` 等文本文件转成适合发送的文本内容。
-
-- `report_progress`
-  把执行结果回报给上级顾问，继续下一轮迭代。
-
-- `get_status`
-  查看当前会话状态、历史数量、模型与历史文件路径。
-
----
-
-## 安装说明
-
-更详细的安装步骤见：
-
-- [Claude Code 安装指南](docs/CLAUDE_CODE_INSTALL.md)
-- [用户手册](docs/用户手册.md)
-
-这里先给一份最常用的安装流程。
-
-### 1. 准备环境
+### 2. 下载并安装依赖
 
 ```bash
-# 需要 Python 3.10+
-python --version
-
-# 进入仓库目录
-cd G:\codex\mcp-aurai-server
-```
-
-### 2. 创建虚拟环境并安装依赖
-
-```bash
+git clone https://github.com/LZMW/mcp-aurai-server.git
+cd mcp-aurai-server
 python -m venv venv
-venv\Scripts\activate
-pip install -e ".[all-dev]"
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS / Linux
+pip install -e .
 ```
 
-### 3. 在 Claude Code 中注册 MCP
+### 3. 在 Claude Code 中注册
 
 ```bash
-claude mcp add --scope user --transport stdio aurai-advisor ^
-  --env AURAI_API_KEY="your-api-key" ^
-  --env AURAI_BASE_URL="https://api.example.com/v1" ^
-  --env AURAI_MODEL="gpt-4o" ^
-  -- "G:\codex\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+claude mcp add --scope user --transport stdio aurai-advisor \
+  --env AURAI_API_KEY="你的API密钥" \
+  --env AURAI_BASE_URL="https://你的API地址/v1" \
+  --env AURAI_MODEL="模型名称" \
+  -- "完整路径\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
 ```
 
-说明：
+**Windows 实际示例**:
 
-- `AURAI_BASE_URL` 必须是 OpenAI 兼容接口地址
-- 当前版本只保留 `custom` 方式，不再使用旧的 `AURAI_PROVIDER`
-- `--scope user` 表示在所有项目里都可用，最省心
+```bash
+claude mcp add --scope user --transport stdio aurai-advisor \
+  --env AURAI_API_KEY="sk-xxxxxxxxxxxxxxxx" \
+  --env AURAI_BASE_URL="https://api.openai.com/v1" \
+  --env AURAI_MODEL="gpt-4o" \
+  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+```
 
-### 4. 验证安装
+`--scope user` 表示在所有项目中可用。
+
+### 4. 验证
 
 ```bash
 claude mcp list
-pytest
 ```
 
-预期：
+看到 `aurai-advisor: ✓ Connected` 即成功。
 
-- `claude mcp list` 能看到 `aurai-advisor`
-- `pytest` 通过
+### 5. 卸载
+
+```bash
+claude mcp remove "aurai-advisor" -s user
+```
 
 ---
 
-## 快速使用
+## 配置参数
 
-### 场景 1：直接咨询问题
-
-```python
-consult_aurai(
-    problem_type="runtime_error",
-    error_message="启动时报 KeyError: api_key",
-    code_snippet="config = load_config()\napi_key = config['api_key']",
-    context={
-        "file_path": "src/config.py",
-        "terminal_output": "Traceback ...",
-    }
-)
-```
-
-### 场景 2：先上传代码文件，再咨询
-
-```python
-sync_context(
-    operation="incremental",
-    files=["src/main.py", "config/settings.json", "README.md"],
-    project_info={
-        "project_name": "My Project",
-        "tech_stack": "Python + FastAPI"
-    }
-)
-
-consult_aurai(
-    problem_type="runtime_error",
-    error_message="请结合已同步文件帮我排查启动失败"
-)
-```
-
-注意：
-
-- 不需要再手动把 `main.py` 复制成 `main.txt`
-- 文本代码文件会自动转成文本发送
-- 二进制文件会被跳过
-
-### 场景 3：多问题并行，使用会话隔离
-
-```python
-consult_aurai(
-    problem_type="runtime_error",
-    error_message="问题 A",
-    session_id="issue-a"
-)
-
-consult_aurai(
-    problem_type="design_issue",
-    error_message="问题 B",
-    session_id="issue-b"
-)
-```
-
-这能避免不同问题互相串台。
-
----
-
-## sync_context 文件上传规则
-
-### 会直接发送的
-
-- `.md`、`.markdown`、`.mdx`
-- `.txt`
-- 各类代码与配置文本文件，例如：
-  - `.py` `.js` `.ts` `.tsx`
-  - `.json` `.yaml` `.yml` `.toml`
-  - `.ini` `.cfg` `.env`
-  - `.java` `.go` `.rs` `.cpp` `.cs`
-
-### 会自动转换的
-
-- 不是 `.txt/.md`，但内容是文本的文件
-- 会自动生成一个 `.txt` 或 `.md` 的发送名
-- 会在内容前附带“原始文件路径”和“自动转换后的发送名”
-
-### 会跳过的
-
-- 图片
-- 压缩包
-- 音视频
-- 可执行文件
-- 明显的二进制内容
-
-如果一批文件里既有代码又有图片：
-
-- 代码照常上传
-- 图片会被记为 `skipped_files`
-- 整次同步仍然成功
-
----
-
-## 环境变量
+所有参数通过环境变量设置，在 `claude mcp add` 时用 `--env` 传入。
 
 ### 必填
 
-| 变量 | 说明 |
-|------|------|
-| `AURAI_API_KEY` | API 密钥 |
-| `AURAI_BASE_URL` | OpenAI 兼容接口地址 |
-| `AURAI_MODEL` | 模型名称 |
+| 环境变量 | 说明 | 示例 |
+|----------|------|------|
+| `AURAI_API_KEY` | API 密钥 | `sk-xxxxxxxx` |
+| `AURAI_BASE_URL` | OpenAI 兼容接口地址 | `https://api.openai.com/v1` |
+| `AURAI_MODEL` | 模型名称 | `gpt-4o` / `claude-opus-4-1-20250805-thinking` |
 
-### 常用可选项
+### AI 调用控制
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `AURAI_TEMPERATURE` | 温度 | `0.7` |
-| `AURAI_MAX_ITERATIONS` | 最大迭代轮数 | `10` |
-| `AURAI_MAX_HISTORY` | 每个会话保留的历史条数上限 | `50` |
-| `AURAI_CONTEXT_WINDOW` | 总上下文窗口大小 | `200000` |
-| `AURAI_MAX_MESSAGE_TOKENS` | 单条大文件消息大小上限 | `150000` |
-| `AURAI_MAX_TOKENS` | 最大输出长度 | `32000` |
-| `AURAI_LOG_LEVEL` | 日志级别 | `INFO` |
-| `AURAI_ENABLE_PERSISTENCE` | 是否持久化历史 | `true` |
-| `AURAI_HISTORY_PATH` | 默认会话历史文件路径 | `~/.mcp-aurai/history.json` |
-| `AURAI_HISTORY_LOCK_TIMEOUT` | 历史文件锁等待时间（秒） | `10` |
-| `AURAI_ENABLE_HISTORY_SUMMARY` | 是否启用历史摘要 | `true` |
-| `AURAI_HISTORY_SUMMARY_KEEP_RECENT` | 摘要后保留的最近原始轮数 | `3` |
-| `AURAI_HISTORY_SUMMARY_TRIGGER` | 触发摘要的原始记录阈值 | `8` |
+| 环境变量 | 默认值 | 范围 | 说明 |
+|----------|--------|------|------|
+| `AURAI_TEMPERATURE` | `0.7` | 0.0–2.0 | 生成温度。越低越确定，越高越随机 |
+| `AURAI_MAX_TOKENS` | `32000` | ≥1 | 远程顾问单次回复的最大输出长度（tokens） |
+| `AURAI_CONTEXT_WINDOW` | `200000` | ≥1 | 模型上下文窗口大小（tokens）。输入 + 输出的总上限 |
+| `AURAI_MAX_MESSAGE_TOKENS` | `150000` | ≥1 | 单个文件超过此值会自动拆分成多段发送 |
+| `AURAI_MAX_ITERATIONS` | `10` | 1–100 | 单个任务最多迭代轮数。达到后直接返回 `requires_human_intervention` |
+
+**上下文预算分配策略**: 优先保证 `AURAI_MAX_TOKENS` 的输出预算。当输入历史过大时裁剪历史消息，而不是压缩输出。仅当基础消息（系统提示词 + 当前问题）本身就超过窗口时才缩减输出上限。
+
+### 对话历史
+
+| 环境变量 | 默认值 | 范围 | 说明 |
+|----------|--------|------|------|
+| `AURAI_MAX_HISTORY` | `50` | 1–200 | 每个会话在本地最多保留多少条历史记录（超出触发摘要压缩或丢弃） |
+| `AURAI_PROMPT_HISTORY_TURNS` | `10` | 1–50 | 每次发送给远程顾问时附带最近多少轮原始对话（摘要不受此限制） |
+| `AURAI_ENABLE_PERSISTENCE` | `true` | bool | 是否将历史保存到磁盘。关闭后重启 Claude Code 历史丢失 |
+| `AURAI_HISTORY_PATH` | `~/.mcp-aurai/history.json` | — | 历史文件存储路径 |
+| `AURAI_HISTORY_LOCK_TIMEOUT` | `10` | 1–120s | 跨进程文件锁等待超时 |
+| `AURAI_ENABLE_HISTORY_SUMMARY` | `true` | bool | 是否自动将旧历史压缩为摘要 |
+| `AURAI_HISTORY_SUMMARY_TRIGGER` | `8` | 2–100 | 原始记录超过此数量时触发摘要压缩 |
+| `AURAI_HISTORY_SUMMARY_KEEP_RECENT` | `3` | 1–20 | 摘要压缩后保留最近 N 轮原始对话 |
+
+**历史机制说明**:
+
+- `AURAI_MAX_HISTORY`（50 条）是本地存储上限，存在磁盘上
+- `AURAI_PROMPT_HISTORY_TURNS`（10 轮）是每次发给顾问的原始对话数量
+- 更早的历史会被摘要机制压缩成纪要，顾问仍能看到上下文脉络
+- 不同 `session_id` 的历史互相隔离
+
+### 进程管理
+
+| 环境变量 | 默认值 | 范围 | 说明 |
+|----------|--------|------|------|
+| `AURAI_STDIO_IDLE_TIMEOUT_SECONDS` | `600` | 0–86400 | 空闲多久后自动退出。`0` = 永不退出（推荐） |
+| `AURAI_STDIO_IDLE_CHECK_INTERVAL_SECONDS` | `30` | 1–3600 | 空闲检查间隔 |
+
+**推荐设置 `AURAI_STDIO_IDLE_TIMEOUT_SECONDS=0`**，避免 Claude Code 还在运行但 MCP 因空闲被误杀。空闲退出前会检查父进程是否存活，但如果不在意残留进程，直接禁用最省心。
+
+### 其他
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `AURAI_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR`。调试时建议 `DEBUG` |
 
 ---
 
-## 当前版本的关键行为
+## 使用指南
 
-### 1. 会话隔离
+MCP 注册后，Claude Code 中自动出现 4 个工具：
 
-- 每个 `session_id` 都有各自的历史
-- 默认不传时使用 `default`
-- 不同会话会落到不同历史文件，避免串会话
+### 典型调用流程
 
-### 2. 历史摘要
+```
+1. sync_context(operation='sync', files=['src/bug.py'], project_info={...})
+   ↑ 让顾问看到你的代码
 
-- 较早历史会自动压成一条“历史摘要”
-- 最近几轮和最近一次 `sync_context` 会尽量保留原样
-- 这样能减少上下文占用，给当前问题腾空间
+2. consult_aurai(problem_type='runtime_error', error_message='...')
+   ↑ 提交问题，获取分析
 
-### 3. 上下文窗口裁剪
+3. 如返回 status='need_info' → 搜集顾问反问的信息 → 再次 consult_aurai(answers_to_questions='...')
+   ↑ 多轮对齐
 
-- 会优先保留系统提示
-- 优先保留最近一次 `sync_context`
-- 再尽量保留最近历史轮次
-- 必要时自动收缩本次输出长度，避免总窗口超限
+4. 如返回 status='success' → 按 action_items 执行修改
 
-### 4. 历史文件更稳
+5. report_progress(actions_taken='改了X', result='success')
+   ↑ 汇报进展，获取下一步指导
 
-- 保存历史时使用锁文件避免并发写坏
-- 写入采用临时文件再替换，避免留下半截 JSON
-
----
-
-## 测试
-
-```bash
-pytest
+6. 重复 4-5，直到 resolved=true
 ```
 
-当前主线覆盖的重点包括：
+### 工具速查
 
-- 历史清空与持久化
-- 会话隔离
-- 自动文本转换上传
-- 历史锁与原子写
-- 历史摘要
-- 上下文窗口裁剪
+| 工具 | 用途 |
+|------|------|
+| `sync_context` | 上传文件和项目背景。`operation='sync'` 追加，`'clear'` 清空 |
+| `consult_aurai` | 提交问题。支持多轮：收到反问→搜集信息→`answers_to_questions` 继续 |
+| `report_progress` | 按顾问指导执行后汇报结果，获取下一步 |
+| `get_status` | 查看会话状态（历史条数、模型、空闲时间） |
 
----
+### 会话隔离
 
-## 文档
+不同任务传不同的 `session_id`，避免上下文串扰：
 
-- [Claude Code 安装指南](docs/CLAUDE_CODE_INSTALL.md)
-- [用户手册](docs/用户手册.md)
-- [开发文档](docs/开发文档.md)
+```
+consult_aurai(session_id='bug-123', ...)   # 修 Bug A
+consult_aurai(session_id='feature-456', ...) # 写功能 B
+```
 
 ---
 
 ## 常见问题
 
-### 为什么上级顾问没收到我上传的代码文件？
+### 上级顾问收不到我上传的代码？
 
-旧版本要求先手动转成 `.txt`。当前版本已经支持自动转换文本文件。
+检查 `sync_context` 返回的 `uploaded_files` 和 `skipped_files`。二进制文件（图片、压缩包）会被自动跳过。代码文件（.py/.js/.ts 等）会自动转换为文本发送。
 
-如果还是没收到，优先检查：
+### 不同问题互相干扰？
 
-- 文件路径是否存在
-- 文件是不是二进制
-- `sync_context` 返回里的 `uploaded_files` / `skipped_files`
+给不同问题传不同的 `session_id`。或设置 `is_new_question=true` 清空当前会话历史。
 
-### 为什么不同问题会互相影响？
+### Claude Code 提示 MCP 连不上？
 
-如果你希望完全隔离，给不同问题传不同 `session_id`。
+- 检查 `claude mcp list` 确认状态
+- 查看 `AURAI_STDIO_IDLE_TIMEOUT_SECONDS`，推荐设为 `0` 禁用空闲退出
+- 查看日志：`AURAI_LOG_LEVEL=DEBUG` 可看到详细日志（输出到 stderr）
 
-### 为什么历史文件看起来变短了？
+### 历史文件变得很大？
 
-这是历史摘要在工作。旧历史被压成纪要，不是丢了，而是换成更省上下文的“会议纪要”。
+历史摘要在自动工作。旧记录被压缩为纪要而非删除，可设置 `AURAI_ENABLE_HISTORY_SUMMARY=false` 完全禁用摘要（不推荐）。
+
+### 怎么切换模型？
+
+```bash
+claude mcp remove "aurai-advisor" -s user
+claude mcp add --scope user --transport stdio aurai-advisor \
+  --env AURAI_API_KEY="sk-..." \
+  --env AURAI_BASE_URL="https://api.openai.com/v1" \
+  --env AURAI_MODEL="新模型名称" \
+  -- "D:\mcp-aurai-server\venv\Scripts\python.exe" "-m" "mcp_aurai.server"
+```
