@@ -717,6 +717,24 @@ async def consult_aurai(
         logger.info("   新问题(自动): %s - %.100s...", problem_type, error_message)
         session_history = _get_session_history(normalized_session_id)
 
+    # 迭代上限检查 — 超限自动清空历史并停止
+    iteration = len(session_history)
+    if iteration >= config.max_iterations:
+        logger.warning("会话 %s 达到最大迭代次数 %s，自动清空历史", normalized_session_id, config.max_iterations)
+        _clear_history(normalized_session_id, f"达到 max_iterations={config.max_iterations}", log_prefix="[超限]")
+        return {
+            "status": "error",
+            "analysis": f"已达到最大迭代次数 ({config.max_iterations})",
+            "guidance": "上级顾问在限定轮数内无法解决此问题，建议人工介入",
+            "action_items": ["请人工审查当前状态"],
+            "code_changes": [],
+            "verification": None,
+            "needs_another_iteration": False,
+            "resolved": False,
+            "requires_human_intervention": True,
+            "token_usage": None,
+        }
+
     # 解析 context 参数（支持 JSON 字符串或字典）
     parsed_context = _parse_json_param(context, dict)
 
@@ -996,17 +1014,19 @@ async def report_progress(
     normalized_session_id = _normalize_session_id(session_id)
     session_history = _get_session_history(normalized_session_id)
 
-    # 检查迭代次数
+    # 检查迭代次数 — 超限自动清空历史并停止
     iteration = len(session_history)
     if iteration >= config.max_iterations:
-        logger.warning(f"达到最大迭代次数 ({config.max_iterations})，请求人工介入")
+        logger.warning("会话 %s 达到最大迭代次数 %s，自动清空历史", normalized_session_id, config.max_iterations)
+        _clear_history(normalized_session_id, f"达到 max_iterations={config.max_iterations}", log_prefix="[超限]")
         return {
             "analysis": f"已达到最大迭代次数 ({config.max_iterations})",
-            "guidance": "建议人工介入检查问题",
+            "guidance": "上级顾问在限定轮数内无法解决此问题，建议人工介入",
             "action_items": ["请人工审查当前状态"],
             "needs_another_iteration": False,
             "resolved": False,
             "requires_human_intervention": True,
+            "token_usage": None,
         }
 
     logger.info(f"收到report_progress请求，结果: {result}，会话: {normalized_session_id}")

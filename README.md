@@ -84,7 +84,7 @@ claude mcp remove "aurai-advisor" -s user
 | `AURAI_MAX_TOKENS` | `32000` | ≥1 | 远程顾问单次回复的最大输出长度（tokens） |
 | `AURAI_CONTEXT_WINDOW` | `200000` | ≥1 | 模型上下文窗口大小（tokens）。输入 + 输出的总上限 |
 | `AURAI_MAX_MESSAGE_TOKENS` | `150000` | ≥1 | 单个文件超过此值会自动拆分成多段发送 |
-| `AURAI_MAX_ITERATIONS` | `10` | 1–100 | 单个任务最多迭代轮数。达到后直接返回 `requires_human_intervention` |
+| `AURAI_MAX_ITERATIONS` | `50` | 1–200 | 单个问题最多对话轮数。50 轮内解决 → 自动清空历史；超限 → 清空历史并返回 `requires_human_intervention` |
 
 **上下文预算 & Token 监控**:
 

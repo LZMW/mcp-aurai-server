@@ -79,12 +79,12 @@ class AuraiConfig(BaseModel):
         description="单条消息最大 tokens（默认：150,000，基于 GLM-4.7 优化）"
     )
 
-    # 最大迭代次数
+    # 最大迭代次数 — 单次问题最多对话轮数，超限自动清空历史并停止
     max_iterations: int = Field(
-        default_factory=lambda: int(os.getenv("AURAI_MAX_ITERATIONS", "10")),
+        default_factory=lambda: int(os.getenv("AURAI_MAX_ITERATIONS", "50")),
         ge=1,
-        le=100,
-        description="最大迭代次数"
+        le=200,
+        description="单次问题最大迭代轮数（默认 50）。超限后清空历史并返回 requires_human_intervention"
     )
 
     # 温度参数
